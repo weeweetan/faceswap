@@ -10,6 +10,7 @@ import sys
 import time
 
 from json import JSONDecodeError
+from shutil import copyfile, copytree
 
 import keras
 from keras import losses
@@ -22,6 +23,7 @@ from lib import Serializer
 from lib.model.losses import DSSIMObjective, PenalizedLoss
 from lib.model.nn_blocks import NNBlocks
 from lib.multithreading import MultiThread
+from lib.utils import get_folder
 from plugins.train._config import Config
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -35,6 +37,7 @@ class ModelBase():
                  gpus,
                  no_logs=False,
                  warp_to_landmarks=False,
+                 augment_color=False,
                  no_flip=False,
                  training_image_size=256,
                  alignments_paths=None,
@@ -46,12 +49,12 @@ class ModelBase():
                  memory_saving_gradients=False,
                  predict=False):
         logger.debug("Initializing ModelBase (%s): (model_dir: '%s', gpus: %s, no_logs: %s"
-                     "training_image_size, %s, alignments_paths: %s, preview_scale: %s, "
-                     "input_shape: %s, encoder_dim: %s, trainer: %s, pingpong: %s, "
-                     "memory_saving_gradients: %s, predict: %s)",
-                     self.__class__.__name__, model_dir, gpus, no_logs, training_image_size,
-                     alignments_paths, preview_scale, input_shape, encoder_dim, trainer,
-                     pingpong, memory_saving_gradients, predict)
+                     "warp_to_landmarks: %s, augment_color: %s, no_flip: %s, training_image_size, "
+                     "%s, alignments_paths: %s, preview_scale: %s, input_shape: %s, encoder_dim: "
+                     "%s, trainer: %s, pingpong: %s, memory_saving_gradients: %s, predict: %s)",
+                     self.__class__.__name__, model_dir, gpus, no_logs, warp_to_landmarks,
+                     augment_color, no_flip, training_image_size, alignments_paths, preview_scale,
+                     input_shape, encoder_dim, trainer, pingpong, memory_saving_gradients, predict)
 
         self.predict = predict
         self.model_dir = model_dir
@@ -83,6 +86,7 @@ class ModelBase():
         self.training_opts = {"alignments": alignments_paths,
                               "preview_scaling": preview_scale / 100,
                               "warp_to_landmarks": warp_to_landmarks,
+                              "augment_color": augment_color,
                               "no_flip": no_flip,
                               "pingpong": pingpong}
 
@@ -391,25 +395,43 @@ class ModelBase():
             logger.info("Loaded model from disk: '%s'", self.model_dir)
         return is_loaded
 
-    def save_models(self):
+    def save_models(self, snapshot_iteration):
         """ Backup and save the models """
         logger.debug("Backing up and saving models")
         should_backup = self.get_save_averages()
         save_threads = list()
         for network in self.networks.values():
             name = "save_{}".format(network.name)
-            save_threads.append(MultiThread(network.save, name=name, should_backup=should_backup))
+            save_threads.append(MultiThread(network.save,
+                                            name=name,
+                                            should_backup=should_backup))
         save_threads.append(MultiThread(self.state.save,
-                                        name="save_state", should_backup=should_backup))
+                                        name="save_state",
+                                        should_backup=should_backup))
         for thread in save_threads:
             thread.start()
         for thread in save_threads:
             if thread.has_error:
                 logger.error(thread.errors[0])
             thread.join()
-        # Put in a line break to avoid jumbled console
-        print("\n")
         logger.info("saved models")
+        if snapshot_iteration:
+            self.snapshot_models()
+
+    def snapshot_models(self):
+        """ Take a snapshot of the model at current state and back up """
+        logger.info("Saving snapshot")
+        src = self.model_dir
+        dst = get_folder("{}_{}".format(self.model_dir, self.iterations))
+        for filename in os.listdir(src):
+            if filename.endswith(".bk"):
+                continue
+            srcfile = os.path.join(src, filename)
+            dstfile = os.path.join(dst, filename)
+            copyfunc = copytree if os.path.isdir(srcfile) else copyfile
+            logger.debug("Saving snapshot: '%s' > '%s'", srcfile, dstfile)
+            copyfunc(srcfile, dstfile)
+        logger.info("Saved snapshot")
 
     def get_save_averages(self):
         """ Return the loss averages since last save and reset historical losses

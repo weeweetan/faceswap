@@ -419,7 +419,8 @@ class ExtractConvertArgs(FaceSwapArgs):
                               "required": True,
                               "help": "Input directory or video. Either a directory containing "
                                       "the image files you wish to process or path to a video "
-                                      "file."})
+                                      "file. NB: This should be the source video/frames NOT the "
+                                      "source faces."})
         argument_list.append({"opts": ("-o", "--output-dir"),
                               "action": DirFullPaths,
                               "dest": "output_dir",
@@ -438,29 +439,32 @@ class ExtractConvertArgs(FaceSwapArgs):
                               "rounding": 2,
                               "type": float,
                               "dest": "ref_threshold",
-                              "default": 0.6,
+                              "default": 0.4,
                               "help": "Threshold for positive face recognition. For use with "
-                                      "nfilter or filter. Lower values are stricter."})
+                                      "nfilter or filter. Lower values are stricter. NB: Using "
+                                      "face filter will significantly decrease extraction speed."})
         argument_list.append({"opts": ("-n", "--nfilter"),
                               "action": FilesFullPaths,
                               "filetypes": "image",
                               "dest": "nfilter",
                               "nargs": "+",
                               "default": None,
-                              "help": "Reference image for the persons you do "
-                                      "not want to process. Should be a front "
-                                      "portrait. Multiple images can be added "
-                                      "space separated"})
+                              "help": "Reference image for the persons you do not want to "
+                                      "process. Should be a front portrait with a single person "
+                                      "in the image. Multiple images can be added space "
+                                      "separated. NB: Using face filter will significantly "
+                                      "decrease extraction speed."})
         argument_list.append({"opts": ("-f", "--filter"),
                               "action": FilesFullPaths,
                               "filetypes": "image",
                               "dest": "filter",
                               "nargs": "+",
                               "default": None,
-                              "help": "Reference images for the person you "
-                                      "want to process. Should be a front "
-                                      "portrait. Multiple images can be added "
-                                      "space separated"})
+                              "help": "Reference images for the person you want to process. "
+                                      "Should be a front portrait with a single person in the "
+                                      "image. Multiple images can be added space separated. NB: "
+                                      "Using face filter will significantly decrease extraction "
+                                      "speed."})
         return argument_list
 
 
@@ -505,8 +509,9 @@ class ExtractArgs(ExtractConvertArgs):
             "choices": PluginLoader.get_available_extractors("align"),
             "default": "fan",
             "help": "R|Aligner to use."
-                    "\nL|'dlib': Dlib Pose Predictor. Faster, less "
-                    "resource intensive, but less accurate."
+                    "\nL|'cv2-dnn': A cpu only CNN based landmark detector. Faster, less "
+                    "resource intensive, but less accurate. Only use this if not using a gpu "
+                    " and time is important."
                     "\nL|'fan': Face Alignment Network. Best aligner. "
                     "GPU heavy, slow when not running on GPU"})
         argument_list.append({"opts": ("-r", "--rotate-images"),
@@ -663,6 +668,8 @@ class ConvertArgs(ExtractConvertArgs):
                     "\nL|color-transfer: Transfers the color distribution from the source to the "
                     "target image using the mean and standard deviations of the L*a*b* "
                     "color space."
+                    "\nL|manual-balance: Manually adjust the balance of the image in a variety of "
+                    "color spaces. Best used with the Preview tool to set correct values."
                     "\nL|match-hist: Adjust the histogram of each color channel in the swapped "
                     "reconstruction to equal the histogram of the masked area in the orginal "
                     "image."
@@ -846,6 +853,16 @@ class TrainArgs(FaceSwapArgs):
                               "dest": "save_interval",
                               "default": 100,
                               "help": "Sets the number of iterations before saving the model"})
+        argument_list.append({"opts": ("-ss", "--snapshot-interval"),
+                              "type": int,
+                              "action": Slider,
+                              "min_max": (0, 100000),
+                              "rounding": 5000,
+                              "dest": "snapshot_interval",
+                              "default": 25000,
+                              "help": "Sets the number of iterations before saving a backup "
+                                      "snapshot of the model in it's current state. Set to 0 for "
+                                      "off."})
         argument_list.append({"opts": ("-bs", "--batch-size"),
                               "type": int,
                               "action": Slider,
@@ -880,14 +897,13 @@ class TrainArgs(FaceSwapArgs):
                               "action": "store_true",
                               "dest": "preview",
                               "default": False,
-                              "help": "Show preview output. If not specified, "
-                                      "write progress to file"})
+                              "help": "Show training preview output. in a separate window."})
         argument_list.append({"opts": ("-w", "--write-image"),
                               "action": "store_true",
                               "dest": "write_image",
                               "default": False,
-                              "help": "Writes the training result to a file "
-                                      "even on preview mode"})
+                              "help": "Writes the training result to a file. The image will be "
+                                      "stored in the root of your FaceSwap folder."})
         argument_list.append({"opts": ("-ag", "--allow-growth"),
                               "action": "store_true",
                               "dest": "allow_growth",
@@ -937,6 +953,17 @@ class TrainArgs(FaceSwapArgs):
                                       "horizontally. Sometimes it is desirable for this not to "
                                       "occur. Generally this should be left off except for "
                                       "during 'fit training'."})
+        argument_list.append({"opts": ("-ac", "--augment-color"),
+                              "action": "store_true",
+                              "dest": "augment_color",
+                              "default": False,
+                              "help": "Perform color augmentation on training images. This has "
+                                      "a 50%% chance of performing Contrast Limited Adaptive "
+                                      "Histogram Equilization on the image. Then it randomly "
+                                      "shifts the color balance +/- 8%% and the lighting +/- 30%% "
+                                      "on each face fed to the model. Should help make the model "
+                                      "less susceptible to color differences between the A and B "
+                                      "set, but may increase training time."})
         argument_list.append({"opts": ("-tia", "--timelapse-input-A"),
                               "action": DirFullPaths,
                               "dest": "timelapse_input_a",

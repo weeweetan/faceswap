@@ -15,7 +15,7 @@ import numpy as np
 from lib.aligner import Extract as AlignerExtract
 from lib.alignments import Alignments as AlignmentsBase
 from lib.face_filter import FaceFilter as FilterFunc
-from lib.utils import (camel_case_split, get_folder, get_image_paths,
+from lib.utils import (camel_case_split, cv2_read_img, get_folder, get_image_paths,
                        set_system_verbosity, _video_extensions)
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -184,11 +184,8 @@ class Images():
         """ Load frames from disk """
         logger.debug("Input is separate Frames. Loading images")
         for filename in self.input_images:
-            logger.trace("Loading image: '%s'", filename)
-            try:
-                image = cv2.imread(filename)  # pylint: disable=no-member
-            except Exception as err:  # pylint: disable=broad-except
-                logger.error("Failed to load image '%s'. Original Error: %s", filename, err)
+            image = cv2_read_img(filename, raise_error=False)
+            if image is None:
                 continue
             yield filename, image
 
@@ -210,11 +207,31 @@ class Images():
             yield filename, frame
         cap.release()
 
-    @staticmethod
-    def load_one_image(filename):
+    def load_one_image(self, filename):
         """ load requested image """
         logger.trace("Loading image: '%s'", filename)
-        return cv2.imread(filename)  # pylint: disable=no-member
+        if self.is_video:
+            if filename.isdigit():
+                frame_no = filename
+            else:
+                frame_no = os.path.splitext(filename)[0][filename.rfind("_") + 1:]
+                logger.trace("Extracted frame_no %s from filename '%s'", frame_no, filename)
+            retval = self.load_one_video_frame(int(frame_no))
+        else:
+            retval = cv2_read_img(filename, raise_error=True)
+        return retval
+
+    def load_one_video_frame(self, frame_no):
+        """ Load a single frame from a video file """
+        logger.trace("Loading video frame: %s", frame_no)
+        cap = cv2.VideoCapture(self.args.input_dir)  # pylint: disable=no-member
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_no - 1)  # pylint: disable=no-member
+        ret, frame = cap.read()
+        if not ret:
+            logger.error("Unable to read from %s from video %s", frame_no, self.args.input_dir)
+            exit(1)
+        cap.release()
+        return frame
 
 
 class PostProcess():
@@ -236,8 +253,9 @@ class PostProcess():
             args = args if isinstance(args, tuple) else tuple()
             kwargs = kwargs if isinstance(kwargs, dict) else dict()
             task = globals()[action](*args, **kwargs)
-            logger.debug("Adding Postprocess action: '%s'", task)
-            actions.append(task)
+            if task.valid:
+                logger.debug("Adding Postprocess action: '%s'", task)
+                actions.append(task)
 
         for action in actions:
             action_name = camel_case_split(action.__class__.__name__)
@@ -262,7 +280,10 @@ class PostProcess():
         if ((hasattr(self.args, "filter") and self.args.filter is not None) or
                 (hasattr(self.args, "nfilter") and
                  self.args.nfilter is not None)):
-            face_filter = dict()
+            face_filter = dict(detector=self.args.detector.replace("-", "_").lower(),
+                               aligner=self.args.aligner.replace("-", "_").lower(),
+                               loglevel=self.args.loglevel,
+                               multiprocess=self.args.multiprocess)
             filter_lists = dict()
             if hasattr(self.args, "ref_threshold"):
                 face_filter["ref_threshold"] = self.args.ref_threshold
@@ -290,6 +311,7 @@ class PostProcessAction():  # pylint: disable=too-few-public-methods
     def __init__(self, *args, **kwargs):
         logger.debug("Initializing %s: (args: %s, kwargs: %s)",
                      self.__class__.__name__, args, kwargs)
+        self.valid = True  # Set to False if invalid params passed in to disable
         logger.debug("Initialized base class %s", self.__class__.__name__)
 
     def process(self, output_item):
@@ -378,24 +400,31 @@ class FaceFilter(PostProcessAction):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        filter_lists = kwargs["filter_lists"]
-        ref_threshold = kwargs.get("ref_threshold", 0.6)
-        self.filter = self.load_face_filter(filter_lists, ref_threshold)
+        logger.info("Extracting and aligning face for Face Filter...")
+        self.filter = self.load_face_filter(**kwargs)
         logger.debug("Initialized %s", self.__class__.__name__)
 
-    def load_face_filter(self, filter_lists, ref_threshold):
+    def load_face_filter(self, filter_lists, ref_threshold, aligner, detector, loglevel,
+                         multiprocess):
         """ Load faces to filter out of images """
         if not any(val for val in filter_lists.values()):
             return None
 
+        facefilter = None
         filter_files = [self.set_face_filter(f_type, filter_lists[f_type])
                         for f_type in ("filter", "nfilter")]
 
         if any(filters for filters in filter_files):
             facefilter = FilterFunc(filter_files[0],
                                     filter_files[1],
+                                    detector,
+                                    aligner,
+                                    loglevel,
+                                    multiprocess,
                                     ref_threshold)
-        logger.debug("Face filter: %s", facefilter)
+            logger.debug("Face filter: %s", facefilter)
+        else:
+            self.valid = False
         return facefilter
 
     @staticmethod
@@ -407,6 +436,9 @@ class FaceFilter(PostProcessAction):
         logger.info("%s: %s", f_type.title(), f_args)
         filter_files = f_args if isinstance(f_args, list) else [f_args]
         filter_files = list(filter(lambda fpath: Path(fpath).exists(), filter_files))
+        if not filter_files:
+            logger.warning("Face %s files were requested, but no files could be found. This "
+                           "filter will not be applied.", f_type)
         logger.debug("Face Filter files: %s", filter_files)
         return filter_files
 
@@ -418,7 +450,7 @@ class FaceFilter(PostProcessAction):
         for idx, detect_face in enumerate(output_item["detected_faces"]):
             check_item = detect_face["face"] if isinstance(detect_face, dict) else detect_face
             if not self.filter.check(check_item):
-                logger.verbose("Skipping not recognized face! Frame: %s Face %s",
+                logger.verbose("Skipping not recognized face: (Frame: %s Face %s)",
                                output_item["filename"], idx)
                 continue
             logger.trace("Accepting recognised face. Frame: %s. Face: %s",
