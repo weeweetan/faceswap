@@ -42,12 +42,15 @@ class Convert():
         self.add_queues()
         self.disk_io = DiskIO(self.alignments, self.images, arguments)
         self.predictor = Predict(self.disk_io.load_queue, self.queue_size, arguments)
+
+        configfile = self.args.configfile if hasattr(self.args, "configfile") else None
         self.converter = Converter(get_folder(self.args.output_dir),
                                    self.predictor.output_size,
                                    self.predictor.has_predicted_mask,
                                    self.disk_io.draw_transparent,
                                    self.disk_io.pre_encode,
-                                   arguments)
+                                   arguments,
+                                   configfile=configfile)
 
         logger.debug("Initialized %s", self.__class__.__name__)
 
@@ -193,7 +196,8 @@ class DiskIO():
             else:
                 args.append(self.args.reference_video)
         logger.debug("Writer args: %s", args)
-        return PluginLoader.get_converter("writer", self.args.writer)(*args)
+        configfile = self.args.configfile if hasattr(self.args, "configfile") else None
+        return PluginLoader.get_converter("writer", self.args.writer)(*args, configfile=configfile)
 
     def get_frame_ranges(self):
         """ split out the frame ranges and parse out 'min' and 'max' values """
@@ -470,7 +474,7 @@ class Predict():
                      if fname.endswith("_state.json")]
         if len(statefile) != 1:
             logger.error("There should be 1 state file in your model folder. %s were found. "
-                         "Specify a trainer with the '-t', '--trainer' option.")
+                         "Specify a trainer with the '-t', '--trainer' option.", len(statefile))
             exit(1)
         statefile = os.path.join(str(model_dir), statefile[0])
 
@@ -488,12 +492,19 @@ class Predict():
     def predict_faces(self):
         """ Get detected faces from images """
         faces_seen = 0
+        consecutive_no_faces = 0
         batch = list()
         while True:
             item = self.in_queue.get()
             if item != "EOF":
                 logger.trace("Got from queue: '%s'", item["filename"])
                 faces_count = len(item["detected_faces"])
+
+                # Safety measure. If a large stream of frames appear that do not have faces,
+                # these will stack up into RAM. Keep a count of consecutive frames with no faces.
+                # If self.batchsize number of frames appear, force the current batch through
+                # to clear RAM.
+                consecutive_no_faces = consecutive_no_faces + 1 if faces_count == 0 else 0
                 self.faces_count += faces_count
                 if faces_count > 1:
                     self.verify_output = True
@@ -505,8 +516,10 @@ class Predict():
                 faces_seen += faces_count
                 batch.append(item)
 
-            if faces_seen < self.batchsize and item != "EOF":
-                logger.trace("Continuing. Current batchsize: %s", faces_seen)
+            if item != "EOF" and (faces_seen < self.batchsize and
+                                  consecutive_no_faces < self.batchsize):
+                logger.trace("Continuing. Current batchsize: %s, consecutive_no_faces: %s",
+                             faces_seen, consecutive_no_faces)
                 continue
 
             if batch:
@@ -522,6 +535,7 @@ class Predict():
 
                 self.queue_out_frames(batch, predicted)
 
+            consecutive_no_faces = 0
             faces_seen = 0
             batch = list()
             if item == "EOF":

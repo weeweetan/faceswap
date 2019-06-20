@@ -35,6 +35,7 @@ class ModelBase():
     def __init__(self,
                  model_dir,
                  gpus,
+                 configfile=None,
                  no_logs=False,
                  warp_to_landmarks=False,
                  augment_color=False,
@@ -48,17 +49,20 @@ class ModelBase():
                  pingpong=False,
                  memory_saving_gradients=False,
                  predict=False):
-        logger.debug("Initializing ModelBase (%s): (model_dir: '%s', gpus: %s, no_logs: %s"
-                     "warp_to_landmarks: %s, augment_color: %s, no_flip: %s, training_image_size, "
-                     "%s, alignments_paths: %s, preview_scale: %s, input_shape: %s, encoder_dim: "
-                     "%s, trainer: %s, pingpong: %s, memory_saving_gradients: %s, predict: %s)",
-                     self.__class__.__name__, model_dir, gpus, no_logs, warp_to_landmarks,
-                     augment_color, no_flip, training_image_size, alignments_paths, preview_scale,
-                     input_shape, encoder_dim, trainer, pingpong, memory_saving_gradients, predict)
+        logger.debug("Initializing ModelBase (%s): (model_dir: '%s', gpus: %s, configfile: %s, "
+                     "no_logs: %s, warp_to_landmarks: %s, augment_color: %s, no_flip: %s, "
+                     "training_image_size, %s, alignments_paths: %s, preview_scale: %s, "
+                     "input_shape: %s, encoder_dim: %s, trainer: %s, pingpong: %s, "
+                     "memory_saving_gradients: %s, predict: %s)",
+                     self.__class__.__name__, model_dir, gpus, configfile, no_logs,
+                     warp_to_landmarks, augment_color, no_flip, training_image_size,
+                     alignments_paths, preview_scale, input_shape, encoder_dim, trainer, pingpong,
+                     memory_saving_gradients, predict)
 
         self.predict = predict
         self.model_dir = model_dir
         self.gpus = gpus
+        self.configfile = configfile
         self.blocks = NNBlocks(use_subpixel=self.config["subpixel_upscaling"],
                                use_icnr_init=self.config["icnr_init"],
                                use_reflect_padding=self.config["reflect_padding"])
@@ -109,14 +113,14 @@ class ModelBase():
         if not _CONFIG:
             model_name = self.config_section
             logger.debug("Loading config for: %s", model_name)
-            _CONFIG = Config(model_name).config_dict
+            _CONFIG = Config(model_name, configfile=self.configfile).config_dict
         return _CONFIG
 
     @property
     def config_changeable_items(self):
         """ Return the dict of config items that can be updated after the model
             has been created """
-        return Config(self.config_section).changeable_items
+        return Config(self.config_section, configfile=self.configfile).changeable_items
 
     @property
     def name(self):
@@ -147,11 +151,14 @@ class ModelBase():
 
             super() this method for defaults otherwise be sure to add """
         logger.debug("Setting training data")
+        # Force number of preview images to between 2 and 16
+        preview_images = self.config.get("preview_images", 14)
+        preview_images = min(max(preview_images, 2), 16)
+        self.training_opts["preview_images"] = preview_images
         self.training_opts["training_size"] = self.state.training_size
         self.training_opts["no_logs"] = self.state.current_session["no_logs"]
         self.training_opts["mask_type"] = self.config.get("mask_type", None)
         self.training_opts["coverage_ratio"] = self.calculate_coverage_ratio()
-        self.training_opts["preview_images"] = 14
         logger.debug("Set training data: %s", self.training_opts)
 
     def calculate_coverage_ratio(self):
@@ -422,7 +429,7 @@ class ModelBase():
         """ Take a snapshot of the model at current state and back up """
         logger.info("Saving snapshot")
         src = self.model_dir
-        dst = get_folder("{}_{}".format(self.model_dir, self.iterations))
+        dst = get_folder("{}_snapshot_{}_iters".format(self.model_dir, self.iterations))
         for filename in os.listdir(src):
             if filename.endswith(".bk"):
                 continue

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """ Command Line Arguments """
+
+# pylint: disable=too-many-lines
+
 import argparse
 import logging
 import os
@@ -102,7 +105,8 @@ class ScriptExecutor():
 
     def execute_script(self, arguments):
         """ Run the script for called command """
-        log_setup(arguments.loglevel, arguments.logfile, self.command)
+        is_gui = hasattr(arguments, "redirect_gui") and arguments.redirect_gui
+        log_setup(arguments.loglevel, arguments.logfile, self.command, is_gui)
         logger.debug("Executing: %s. PID: %s", self.command, os.getpid())
         try:
             script = self.import_script()
@@ -352,6 +356,12 @@ class FaceSwapArgs():
         """ Arguments that are used in ALL parts of Faceswap
             DO NOT override this """
         global_args = list()
+        global_args.append({"opts": ("-C", "--configfile"),
+                            "action": FileFullPaths,
+                            "filetypes": "ini",
+                            "type": str,
+                            "help": "Optionally overide the saved config with the path to a "
+                                    "custom config file."})
         global_args.append({"opts": ("-L", "--loglevel"),
                             "type": str.upper,
                             "dest": "loglevel",
@@ -514,6 +524,21 @@ class ExtractArgs(ExtractConvertArgs):
                     " and time is important."
                     "\nL|'fan': Face Alignment Network. Best aligner. "
                     "GPU heavy, slow when not running on GPU"})
+        argument_list.append({"opts": ("-nm", "--normalization"),
+                              "action": Radio,
+                              "type": str.lower,
+                              "dest": "normalization",
+                              "choices": ["none", "clahe", "hist", "mean"],
+                              "default": "none",
+                              "help": "R|Performing normalization can help the aligner better "
+                                      "align faces with difficult lighting conditions at an "
+                                      "extraction speed cost. Different methods will yield "
+                                      "different results on different sets."
+                                      "\nL|'none': Don't perform normalization on the face."
+                                      "\nL|'clahe': Perform Contrast Limited Adaptive Histogram "
+                                      "Equalization on the face."
+                                      "\nL|'hist': Equalize the histograms on the RGB channels."
+                                      "\nL|'mean': Normalize the face colors to the mean."})
         argument_list.append({"opts": ("-r", "--rotate-images"),
                               "type": str,
                               "dest": "rotate_images",
@@ -536,15 +561,13 @@ class ExtractArgs(ExtractConvertArgs):
                                       "threshold. Discarded images are moved into a \"blurry\" "
                                       "sub-folder. Lower values allow more blur. Set to 0.0 to "
                                       "turn off."})
-        argument_list.append({"opts": ("-mp", "--multiprocess"),
+        argument_list.append({"opts": ("-sp", "--singleprocess"),
                               "action": "store_true",
                               "default": False,
-                              "help": "Run extraction in parallel. Offers "
-                                      "speed up for some extractor/detector "
-                                      "combinations, less so for others. "
-                                      "Only has an effect if both the "
-                                      "aligner and detector use the GPU, "
-                                      "otherwise this is automatic."})
+                              "help": "Don't run extraction in parallel. Will run detection first "
+                                      "then alignment (2 passes). Useful if VRAM is at a premium. "
+                                      "Only has an effect if both the aligner and detector use "
+                                      "the GPU, otherwise this is automatically off."})
         argument_list.append({"opts": ("-sz", "--size"),
                               "type": int,
                               "action": Slider,
@@ -700,6 +723,8 @@ class ConvertArgs(ExtractConvertArgs):
                     "\nL|components: An improved face hull mask using a facehull of 8 facial "
                     "parts."
                     "\nL|dfl_full: An improved face hull mask using a facehull of 3 facial parts."
+                    "\nL|extended: Based on components mask. Extends the eyebrow points to "
+                    "further up the forehead. May perform badly on difficult angles."
                     "\nL|facehull: Face cutout based on landmarks."
                     "\nL|predicted: The predicted mask generated from the model. If the model was "
                     "not trained with a mask then this will fallback to "
@@ -712,7 +737,7 @@ class ConvertArgs(ExtractConvertArgs):
                                                                                     False),
                               "default": "opencv",
                               "help": "R|The plugin to use to output the converted images. The "
-                                      "writers are configurable in '/config/convert.ini' or `Edit "
+                                      "writers are configurable in '/config/convert.ini' or 'Edit "
                                       "> Configure Convert Plugins:'"
                                       "\nL|ffmpeg: [video] Writes out the convert straight to "
                                       "video. When the input is a series of images then the "
