@@ -65,9 +65,11 @@ class GPUStats():
         """ Initialize pynvml """
         if not self.initialized:
             if K.backend() == "plaidml.keras.backend":
+                loglevel = "INFO"
                 if self.logger:
                     self.logger.debug("plaidML Detected. Using plaidMLStats")
-                self.plaid = plaidlib(log=log)
+                    loglevel = self.logger.getEffectiveLevel()
+                self.plaid = plaidlib(loglevel=loglevel, log=log)
             elif IS_MACOS:
                 if self.logger:
                     self.logger.debug("macOS Detected. Using pynvx")
@@ -87,7 +89,13 @@ class GPUStats():
                     if plaidlib is not None:
                         self.plaid = plaidlib(log=log)
                     else:
-                        raise err
+                        msg = ("There was an error reading from the Nvidia Machine Learning "
+                               "Library. The most likely cause is incorrectly installed drivers. "
+                               "Please remove and reinstall your Nvidia drivers before reporting."
+                               "Original Error: {}".format(str(err)))
+                        if self.logger:
+                            self.logger.error(msg)
+                        raise ValueError(msg)
             self.initialized = True
             self.get_device_count()
             self.get_active_devices()

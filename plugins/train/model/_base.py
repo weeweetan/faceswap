@@ -38,7 +38,7 @@ class ModelBase():
                  configfile=None,
                  no_logs=False,
                  warp_to_landmarks=False,
-                 augment_color=False,
+                 augment_color=True,
                  no_flip=False,
                  training_image_size=256,
                  alignments_paths=None,
@@ -152,9 +152,6 @@ class ModelBase():
             super() this method for defaults otherwise be sure to add """
         logger.debug("Setting training data")
         # Force number of preview images to between 2 and 16
-        preview_images = self.config.get("preview_images", 14)
-        preview_images = min(max(preview_images, 2), 16)
-        self.training_opts["preview_images"] = preview_images
         self.training_opts["training_size"] = self.state.training_size
         self.training_opts["no_logs"] = self.state.current_session["no_logs"]
         self.training_opts["mask_type"] = self.config.get("mask_type", None)
@@ -428,8 +425,8 @@ class ModelBase():
     def snapshot_models(self):
         """ Take a snapshot of the model at current state and back up """
         logger.info("Saving snapshot")
-        src = self.model_dir
-        dst = get_folder("{}_snapshot_{}_iters".format(self.model_dir, self.iterations))
+        src = str(self.model_dir)
+        dst = str(get_folder("{}_snapshot_{}_iters".format(src, self.iterations)))
         for filename in os.listdir(src):
             if filename.endswith(".bk"):
                 continue

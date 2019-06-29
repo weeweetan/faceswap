@@ -6,7 +6,8 @@ import platform
 import sys
 import tkinter as tk
 from tkinter import filedialog, ttk
-
+from threading import Event, Thread
+from queue import Queue
 import numpy as np
 
 from PIL import Image, ImageTk
@@ -19,14 +20,15 @@ _CONFIG = None
 _IMAGES = None
 
 
-def initialize_config(cli_opts, scaling_factor, pathcache, statusbar, session):
+def initialize_config(root, cli_opts, scaling_factor, pathcache, statusbar, session):
     """ Initialize the config and add to global constant """
     global _CONFIG  # pylint: disable=global-statement
     if _CONFIG is not None:
         return
-    logger.debug("Initializing config: (cli_opts: %s, tk_vars: %s, pathcache: %s, statusbar: %s, "
-                 "session: %s)", cli_opts, scaling_factor, pathcache, statusbar, session)
-    _CONFIG = Config(cli_opts, scaling_factor, pathcache, statusbar, session)
+    logger.debug("Initializing config: (root: %s, cli_opts: %s, tk_vars: %s, pathcache: %s, "
+                 "statusbar: %s, session: %s)", root, cli_opts, scaling_factor, pathcache,
+                 statusbar, session)
+    _CONFIG = Config(root, cli_opts, scaling_factor, pathcache, statusbar, session)
 
 
 def get_config():
@@ -274,7 +276,7 @@ class Images():
             logger.debug("Folder does not exist")
             return None
         files = [os.path.join(imgpath, f)
-                 for f in os.listdir(imgpath) if f.endswith((".png", ".jpg"))]
+                 for f in os.listdir(imgpath) if f.lower().endswith((".png", ".jpg"))]
         logger.trace("Image files: %s", files)
         return files
 
@@ -537,10 +539,11 @@ class Config():
         Don't call directly. Call get_config()
     """
 
-    def __init__(self, cli_opts, scaling_factor, pathcache, statusbar, session):
-        logger.debug("Initializing %s: (cli_opts: %s, scaling_factor: %s, pathcache: %s, "
-                     "statusbar: %s, session: %s)", self.__class__.__name__, cli_opts,
+    def __init__(self, root, cli_opts, scaling_factor, pathcache, statusbar, session):
+        logger.debug("Initializing %s: (root %s, cli_opts: %s, scaling_factor: %s, pathcache: %s, "
+                     "statusbar: %s, session: %s)", self.__class__.__name__, root, cli_opts,
                      scaling_factor, pathcache, statusbar, session)
+        self.root = root
         self.cli_opts = cli_opts
         self.scaling_factor = scaling_factor
         self.pathcache = pathcache
@@ -563,6 +566,20 @@ class Config():
         return {self.command_notebook.tools_notebook.tab(tab_id, "text").lower(): tab_id
                 for tab_id in range(0, self.command_notebook.tools_notebook.index("end"))}
 
+    def set_cursor_busy(self, widget=None):
+        """ Set the root or widget cursor to busy """
+        logger.debug("Setting cursor to busy. widget: %s", widget)
+        widget = self.root if widget is None else widget
+        widget.config(cursor="watch")
+        widget.update_idletasks()
+
+    def set_cursor_default(self, widget=None):
+        """ Set the root or widget cursor to default """
+        logger.debug("Setting cursor to default. widget: %s", widget)
+        widget = self.root if widget is None else widget
+        widget.config(cursor="")
+        widget.update_idletasks()
+
     @staticmethod
     def set_tk_vars():
         """ TK Variables to be triggered by to indicate
@@ -572,6 +589,9 @@ class Config():
 
         runningtask = tk.BooleanVar()
         runningtask.set(False)
+
+        istraining = tk.BooleanVar()
+        istraining.set(False)
 
         actioncommand = tk.StringVar()
         actioncommand.set(None)
@@ -585,6 +605,9 @@ class Config():
         refreshgraph = tk.BooleanVar()
         refreshgraph.set(False)
 
+        smoothgraph = tk.DoubleVar()
+        smoothgraph.set(0.90)
+
         updatepreview = tk.BooleanVar()
         updatepreview.set(False)
 
@@ -593,10 +616,12 @@ class Config():
 
         tk_vars = {"display": display,
                    "runningtask": runningtask,
+                   "istraining": istraining,
                    "action": actioncommand,
                    "generate": generatecommand,
                    "consoleclear": consoleclear,
                    "refreshgraph": refreshgraph,
+                   "smoothgraph": smoothgraph,
                    "updatepreview": updatepreview,
                    "traintimeout": traintimeout}
         logger.debug(tk_vars)
@@ -904,3 +929,55 @@ class ControlBuilder():
             ctl["values"] = [choice for choice in choices]
         logger.debug("Added control to Options Frame: %s", self.title)
         return ctl
+
+
+class LongRunningTask(Thread):
+    """ For long running tasks, to stop the GUI becoming unresponsive
+        Run in a thread and handle cursor events """
+    def __init__(self, group=None, target=None, name=None, args=(), kwargs=None, *, daemon=True,
+                 widget=None):
+        logger.debug("Initializing %s: (group: %s, target: %s, name: %s, args: %s, kwargs: %s, "
+                     "daemon: %s)", self.__class__.__name__, group, target, name, args, kwargs,
+                     daemon)
+        super().__init__(group=group, target=target, name=name, args=args, kwargs=kwargs,
+                         daemon=daemon)
+        self.err = None
+        self.widget = widget
+        self._config = get_config()
+        self._config.set_cursor_busy(widget=self.widget)
+        self.complete = Event()
+        self._queue = Queue()
+        logger.debug("Initialized %s", self.__class__.__name__,)
+
+    def run(self):
+        """ Run the target in a thread """
+        try:
+            if self._target:
+                retval = self._target(*self._args, **self._kwargs)
+                self._queue.put(retval)
+        except Exception:  # pylint: disable=broad-except
+            self.err = sys.exc_info()
+            logger.debug("Error in thread (%s): %s", self._name,
+                         self.err[1].with_traceback(self.err[2]))
+        finally:
+            self.complete.set()
+            # Avoid a refcycle if the thread is running a function with
+            # an argument that has a member that points to the thread.
+            del self._target, self._args, self._kwargs
+
+    def get_result(self):
+        """ Return the result from the queue """
+        if not self.complete.is_set():
+            logger.warning("Aborting attempt to retrieve result from a LongRunningTask that is "
+                           "still running")
+            return None
+        if self.err:
+            logger.debug("Error caught in thread")
+            self._config.set_cursor_default(widget=self.widget)
+            raise self.err[1].with_traceback(self.err[2])
+
+        logger.debug("Getting result from thread")
+        retval = self._queue.get()
+        logger.debug("Got result from thread")
+        self._config.set_cursor_default(widget=self.widget)
+        return retval
