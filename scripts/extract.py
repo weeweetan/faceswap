@@ -93,7 +93,8 @@ class Extract():
                 logger.trace("Skipping image '%s' due to extract_every_n = %s",
                              filename, self.skip_num)
                 continue
-            if image is None or not image.any():
+            if image is None or (not image.any() and image.ndim not in ((2, 3))):
+                # All black frames will return not np.any() so check dims too
                 logger.warning("Unable to open image. Skipping: '%s'", filename)
                 continue
             imagename = os.path.basename(filename)
@@ -228,7 +229,7 @@ class Extract():
         detected_faces = faces["detected_faces"]
         for idx, face in enumerate(detected_faces):
             detected_face = DetectedFace()
-            detected_face.from_bounding_box(face, image)
+            detected_face.from_bounding_box_dict(face, image)
             detected_face.landmarksXY = landmarks[idx]
             detected_face.load_aligned(image, size=size, align_eyes=align_eyes)
             final_faces.append({"file_location": self.output_dir / Path(filename).stem,

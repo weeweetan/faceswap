@@ -157,6 +157,7 @@ class FaceswapControl():
     def execute_script(self, command, args):
         """ Execute the requested Faceswap Script """
         logger.debug("Executing Faceswap: (command: '%s', args: %s)", command, args)
+        self.thread = None
         self.command = command
         kwargs = {"stdout": PIPE,
                   "stderr": PIPE,
@@ -186,7 +187,7 @@ class FaceswapControl():
                         (self.command == "effmpeg" and self.capture_ffmpeg(output)) or
                         (self.command not in ("train", "effmpeg") and self.capture_tqdm(output))):
                     continue
-                if self.command == "train" and output.strip().endswith("saved models"):
+                if self.command == "train" and "[saved models]" in output.strip().lower():
                     logger.debug("Trigger update preview")
                     self.wrapper.tk_vars["updatepreview"].set(True)
                 print(output.strip())
@@ -353,6 +354,7 @@ class FaceswapControl():
         else:
             logger.debug("Termination Complete. Cleaning up")
             _ = self.thread.get_result()  # Terminate the LongRunningTask object
+            self.thread = None
 
     def terminate_in_thread(self, command, process):
         """ Terminate the subprocess """

@@ -8,7 +8,9 @@
     For each source frame, the plugin must pass a dict to finalize containing:
     {"filename": <filename of source frame>,
      "image": <source image>,
-     "detected_faces": <list of BoundingBoxes>} (Class defined in /lib/faces_detect)
+     "detected_faces": <list of dicts containing bounding box points>}}
+
+    - Use the function self.to_bounding_box_dict(left, right, top, bottom) to define the dict
     """
 
 import logging
@@ -18,9 +20,8 @@ from io import StringIO
 
 import cv2
 
-from lib.faces_detect import BoundingBox
 from lib.gpu_stats import GPUStats
-from lib.utils import rotate_landmarks, GetModel
+from lib.utils import deprecation_warning, rotate_landmarks, GetModel
 from plugins.extract._config import Config
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -71,6 +72,12 @@ class Detector():
         # will support. It is also used for holding the number of threads/
         # processes for parallel processing plugins
         self.batch_size = 1
+
+        if rotation is not None:
+            deprecation_warning("Rotation ('-r', '--rotation')",
+                                additional_info="It is not necessary for most detectors and will "
+                                                "be moved to plugin config for those detectors "
+                                                "that require it.")
         logger.debug("Initialized _base %s", self.__class__.__name__)
 
     # <<< OVERRIDE METHODS >>> #
@@ -88,7 +95,7 @@ class Detector():
     def detect_faces(self, *args, **kwargs):
         """ Detect faces in rgb image
             Override for specific detector
-            Must return a list of BoundingBox's"""
+            Must return a list of bounding box dicts (See module docstring)"""
         try:
             if not self.init:
                 self.initialize(*args, **kwargs)
@@ -150,7 +157,9 @@ class Detector():
         """ Filter out any faces smaller than the min size threshold """
         retval = list()
         for face in detected_faces:
-            face_size = (face.width ** 2 + face.height ** 2) ** 0.5
+            width = face["right"] - face["left"]
+            height = face["bottom"] - face["top"]
+            face_size = (width ** 2 + height ** 2) ** 0.5
             if face_size < self.min_size:
                 logger.debug("Removing detected face: (face_size: %s, min_size: %s",
                              face_size, self.min_size)
@@ -252,8 +261,8 @@ class Detector():
 
     @staticmethod
     def rotate_rect(bounding_box, rotation_matrix):
-        """ Rotate a BoundingBox based on the rotation_matrix"""
-        logger.trace("Rotating BoundingBox")
+        """ Rotate a bounding box dict based on the rotation_matrix"""
+        logger.trace("Rotating bounding box")
         bounding_box = rotate_landmarks(bounding_box, rotation_matrix)
         return bounding_box
 
@@ -331,11 +340,18 @@ class Detector():
         return int(vram["card_id"]), int(vram["free"]), int(vram["total"])
 
     @staticmethod
-    def set_predetected(width, height):
-        """ Set a BoundingBox for predetected faces """
+    def to_bounding_box_dict(left, top, right, bottom):
+        """ Return a dict for the bounding box """
+        return dict(left=int(round(left)),
+                    right=int(round(right)),
+                    top=int(round(top)),
+                    bottom=int(round(bottom)))
+
+    def set_predetected(self, width, height):
+        """ Set a bounding box dict for predetected faces """
         # Predetected_face is used for sort tool.
         # Landmarks should not be extracted again from predetected faces,
         # because face data is lost, resulting in a large variance
         # against extract from original image
         logger.debug("Setting predetected face")
-        return [BoundingBox(0, 0, width, height)]
+        return [self.to_bounding_box_dict(0, 0, width, height)]

@@ -14,7 +14,7 @@ from lib.model import masks
 from lib.multithreading import FixedProducerDispatcher
 from lib.queue_manager import queue_manager
 from lib.umeyama import umeyama
-from lib.utils import cv2_read_img
+from lib.utils import cv2_read_img, FaceswapError
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -33,6 +33,7 @@ class TrainingDataGenerator():
         self.training_opts = training_opts
         self.mask_class = self.set_mask_class()
         self.landmarks = self.training_opts.get("landmarks", None)
+        self.fixed_producer_dispatcher = None  # Set by FPD when loading
         self._nearest_landmarks = None
         self.processing = ImageManipulation(model_input_size,
                                             model_output_size,
@@ -68,15 +69,24 @@ class TrainingDataGenerator():
         if self.mask_class:
             batch_shape.append((self.batchsize, self.model_output_size, self.model_output_size, 1))
 
-        load_process = FixedProducerDispatcher(
+        self.fixed_producer_dispatcher = FixedProducerDispatcher(
             method=self.load_batches,
             shapes=batch_shape,
             in_queue=queue_in,
             out_queue=queue_out,
             args=(images, side, is_display, do_shuffle, batchsize))
-        load_process.start()
+        self.fixed_producer_dispatcher.start()
         logger.debug("Batching to queue: (side: '%s', is_display: %s)", side, is_display)
-        return self.minibatch(side, is_display, load_process)
+        return self.minibatch(side, is_display, self.fixed_producer_dispatcher)
+
+    def join_subprocess(self):
+        """ Join the FixedProduceerDispatcher subprocess from outside this module """
+        logger.debug("Joining FixedProducerDispatcher")
+        if self.fixed_producer_dispatcher is None:
+            logger.debug("FixedProducerDispatcher not yet initialized. Exiting")
+            return
+        self.fixed_producer_dispatcher.join()
+        logger.debug("Joined FixedProducerDispatcher")
 
     @staticmethod
     def make_queues(side, is_preview, is_timelapse):
@@ -133,7 +143,12 @@ class TrainingDataGenerator():
         msg = ("Number of images is lower than batch-size (Note that too few "
                "images may lead to bad training). # images: {}, "
                "batch-size: {}".format(length, self.batchsize))
-        assert length >= self.batchsize, msg
+        try:
+            assert length >= self.batchsize, msg
+        except AssertionError as err:
+            msg += ("\nYou should increase the number of images in your training set or lower "
+                    "your batch-size.")
+            raise FaceswapError(msg) from err
 
     @staticmethod
     def minibatch(side, is_display, load_process):
@@ -189,9 +204,16 @@ class TrainingDataGenerator():
         lm_key = sha1(image).hexdigest()
         try:
             src_points = self.landmarks[side][lm_key]
-        except KeyError:
-            raise Exception("Landmarks not found for hash: '{}' file: '{}'".format(lm_key,
-                                                                                   filename))
+        except KeyError as err:
+            msg = ("At least one of your images does not have a matching entry in your alignments "
+                   "file."
+                   "\nIf you are training with a mask or using 'warp to landmarks' then every "
+                   "face you intend to train on must exist within the alignments file."
+                   "\nThe specific file that caused the failure was '{}' which has a hash of {}."
+                   "\nMost likely there will be more than just this file missing from the "
+                   "alignments file. You can use the Alignments Tool to help identify missing "
+                   "alignments".format(lm_key, filename))
+            raise FaceswapError(msg) from err
         logger.trace("Returning: (src_points: %s)", src_points)
         return src_points
 
@@ -345,7 +367,15 @@ class ImageManipulation():
         logger.trace("Randomly warping image")
         height, width = image.shape[0:2]
         coverage = self.get_coverage(image)
-        assert height == width and height % 2 == 0
+        try:
+            assert height == width and height % 2 == 0
+        except AssertionError as err:
+            msg = ("Training images should be square with an even number of pixels across each "
+                   "side. An image was found with width: {}, height: {}."
+                   "\nMost likely this is a frame rather than a face within your training set. "
+                   "\nMake sure that the only images within your training set are faces generated "
+                   "from the Extract process.".format(width, height))
+            raise FaceswapError(msg) from err
 
         range_ = np.linspace(height // 2 - coverage // 2,
                              height // 2 + coverage // 2,

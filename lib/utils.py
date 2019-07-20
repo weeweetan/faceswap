@@ -12,25 +12,25 @@ from socket import timeout as socket_timeout, error as socket_error
 from hashlib import sha1
 from pathlib import Path
 from re import finditer
-
-import cv2
-import numpy as np
-
 from tqdm import tqdm
 
-from lib.faces_detect import BoundingBox, DetectedFace
+import numpy as np
+import cv2
+
+
+from lib.faces_detect import DetectedFace
 
 
 # Global variables
-_image_extensions = [  # pylint: disable=invalid-name
+_image_extensions = [  # pylint:disable=invalid-name
     ".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff"]
-_video_extensions = [  # pylint: disable=invalid-name
-    ".avi", ".flv", ".mkv", ".mov", ".mp4", ".mpeg", ".webm"]
+_video_extensions = [  # pylint:disable=invalid-name
+    ".avi", ".flv", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm"]
 
 
 def get_folder(path, make_folder=True):
     """ Return a path to a folder, creating it if it doesn't exist """
-    logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
     logger.debug("Requested path: '%s'", path)
     output_dir = Path(path)
     if not make_folder and not output_dir.exists():
@@ -43,7 +43,7 @@ def get_folder(path, make_folder=True):
 
 def get_image_paths(directory):
     """ Return a list of images that reside in a folder """
-    logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
     image_extensions = _image_extensions
     dir_contents = list()
 
@@ -67,7 +67,7 @@ def get_image_paths(directory):
 
 def full_path_split(path):
     """ Split a given path into all of it's separate components """
-    logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
     allparts = list()
     while True:
         parts = os.path.split(path)
@@ -89,12 +89,12 @@ def cv2_read_img(filename, raise_error=False):
         Logs an error if the image returned is None. or an error has occured.
 
         Pass raise_error=True if error should be raised """
-    logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
     logger.trace("Requested image: '%s'", filename)
     success = True
     image = None
     try:
-        image = cv2.imread(filename)  # pylint: disable=no-member
+        image = cv2.imread(filename)  # pylint:disable=no-member,c-extension-no-member
         if image is None:
             raise ValueError
     except TypeError:
@@ -110,7 +110,7 @@ def cv2_read_img(filename, raise_error=False):
         logger.error(msg)
         if raise_error:
             raise Exception(msg)
-    except Exception as err:  # pylint: disable=broad-except
+    except Exception as err:  # pylint:disable=broad-except
         success = False
         msg = "Failed to load image '{}'. Original Error: {}".format(filename, str(err))
         logger.error(msg)
@@ -122,7 +122,7 @@ def cv2_read_img(filename, raise_error=False):
 
 def hash_image_file(filename):
     """ Return an image file's sha1 hash """
-    logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
     img = cv2_read_img(filename, raise_error=True)
     img_hash = sha1(img).hexdigest()
     logger.trace("filename: '%s', hash: %s", filename, img_hash)
@@ -132,15 +132,17 @@ def hash_image_file(filename):
 def hash_encode_image(image, extension):
     """ Encode the image, get the hash and return the hash with
         encoded image """
-    img = cv2.imencode(extension, image)[1]  # pylint: disable=no-member
+    img = cv2.imencode(extension, image)[1]  # pylint:disable=no-member,c-extension-no-member
     f_hash = sha1(
-        cv2.imdecode(img, cv2.IMREAD_UNCHANGED)).hexdigest()  # pylint: disable=no-member
+        cv2.imdecode(  # pylint:disable=no-member,c-extension-no-member
+            img,
+            cv2.IMREAD_UNCHANGED)).hexdigest()  # pylint:disable=no-member,c-extension-no-member
     return f_hash, img
 
 
 def backup_file(directory, filename):
     """ Backup a given file by appending .bk to the end """
-    logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
     logger.trace("Backing up: '%s'", filename)
     origfile = os.path.join(directory, filename)
     backupfile = origfile + '.bk'
@@ -173,7 +175,7 @@ def set_system_verbosity(loglevel):
         2 - filter out WARNING logs
         3 - filter out ERROR logs  """
 
-    logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
     from lib.logger import get_loglevel
     numeric_level = get_loglevel(loglevel)
     loglevel = "2" if numeric_level > 15 else "0"
@@ -184,14 +186,26 @@ def set_system_verbosity(loglevel):
             warnings.simplefilter(action='ignore', category=warncat)
 
 
+def deprecation_warning(func_name, additional_info=None):
+    """ Log at warning level that a function will be removed in future """
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
+    logger.debug("func_name: %s, additional_info: %s", func_name, additional_info)
+    msg = "{}  has been deprecated and will be removed from a future update.".format(func_name)
+    if additional_info is not None:
+        msg += " {}".format(additional_info)
+    logger.warning(msg)
+
+
 def rotate_landmarks(face, rotation_matrix):
-    # pylint: disable=c-extension-no-member
+    # pylint:disable=c-extension-no-member
     """ Rotate the landmarks and bounding box for faces
         found in rotated images.
-        Pass in a DetectedFace object, Alignments dict or BoundingBox"""
-    logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+        Pass in a DetectedFace object, Alignments dict or bounding box dict
+        (as defined in lib/plugins/extract/detect/_base.py) """
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
     logger.trace("Rotating landmarks: (rotation_matrix: %s, type(face): %s",
                  rotation_matrix, type(face))
+    # Detected Face Object
     if isinstance(face, DetectedFace):
         bounding_box = [[face.x, face.y],
                         [face.x + face.w, face.y],
@@ -199,7 +213,8 @@ def rotate_landmarks(face, rotation_matrix):
                         [face.x, face.y + face.h]]
         landmarks = face.landmarksXY
 
-    elif isinstance(face, dict):
+    # Alignments Dict
+    elif isinstance(face, dict) and "x" in face:
         bounding_box = [[face.get("x", 0), face.get("y", 0)],
                         [face.get("x", 0) + face.get("w", 0),
                          face.get("y", 0)],
@@ -209,18 +224,20 @@ def rotate_landmarks(face, rotation_matrix):
                          face.get("y", 0) + face.get("h", 0)]]
         landmarks = face.get("landmarksXY", list())
 
-    elif isinstance(face, BoundingBox):
-        bounding_box = [[face.left, face.top],
-                        [face.right, face.top],
-                        [face.right, face.bottom],
-                        [face.left, face.bottom]]
+    # Bounding Box Dict
+    elif isinstance(face, dict) and "left" in face:
+        bounding_box = [[face["left"], face["top"]],
+                        [face["right"], face["top"]],
+                        [face["right"], face["bottom"]],
+                        [face["left"], face["bottom"]]]
         landmarks = list()
+
     else:
         raise ValueError("Unsupported face type")
 
     logger.trace("Original landmarks: %s", landmarks)
 
-    rotation_matrix = cv2.invertAffineTransform(  # pylint: disable=no-member
+    rotation_matrix = cv2.invertAffineTransform(  # pylint:disable=no-member
         rotation_matrix)
     rotated = list()
     for item in (bounding_box, landmarks):
@@ -228,7 +245,7 @@ def rotate_landmarks(face, rotation_matrix):
             continue
         points = np.array(item, np.int32)
         points = np.expand_dims(points, axis=0)
-        transformed = cv2.transform(points,  # pylint: disable=no-member
+        transformed = cv2.transform(points,  # pylint:disable=no-member
                                     rotation_matrix).astype(np.int32)
         rotated.append(transformed.squeeze())
 
@@ -238,28 +255,33 @@ def rotate_landmarks(face, rotation_matrix):
     pt_y = min([pnt[1] for pnt in rotated[0]])
     pt_x1 = max([pnt[0] for pnt in rotated[0]])
     pt_y1 = max([pnt[1] for pnt in rotated[0]])
+    width = pt_x1 - pt_x
+    height = pt_y1 - pt_y
 
     if isinstance(face, DetectedFace):
         face.x = int(pt_x)
         face.y = int(pt_y)
-        face.w = int(pt_x1 - pt_x)
-        face.h = int(pt_y1 - pt_y)
+        face.w = int(width)
+        face.h = int(height)
         face.r = 0
         if len(rotated) > 1:
             rotated_landmarks = [tuple(point) for point in rotated[1].tolist()]
             face.landmarksXY = rotated_landmarks
-    elif isinstance(face, dict):
+    elif isinstance(face, dict) and "x" in face:
         face["x"] = int(pt_x)
         face["y"] = int(pt_y)
-        face["w"] = int(pt_x1 - pt_x)
-        face["h"] = int(pt_y1 - pt_y)
+        face["w"] = int(width)
+        face["h"] = int(height)
         face["r"] = 0
         if len(rotated) > 1:
             rotated_landmarks = [tuple(point) for point in rotated[1].tolist()]
             face["landmarksXY"] = rotated_landmarks
     else:
-        rotated_landmarks = BoundingBox(pt_x, pt_y, pt_x1, pt_y1)
-        face = rotated_landmarks
+        face["left"] = int(pt_x)
+        face["top"] = int(pt_y)
+        face["right"] = int(pt_x1)
+        face["bottom"] = int(pt_y1)
+        rotated_landmarks = face
 
     logger.trace("Rotated landmarks: %s", rotated_landmarks)
     return face
@@ -276,17 +298,22 @@ def camel_case_split(identifier):
 
 def safe_shutdown():
     """ Close queues, threads and processes in event of crash """
-    logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+    logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
     logger.debug("Safely shutting down")
     from lib.queue_manager import queue_manager
     from lib.multithreading import terminate_processes
     queue_manager.terminate_queues()
     terminate_processes()
     logger.debug("Cleanup complete. Shutting down queue manager and exiting")
-    queue_manager._log_queue.put(None)  # pylint: disable=protected-access
-    while not queue_manager._log_queue.empty():  # pylint: disable=protected-access
+    queue_manager._log_queue.put(None)  # pylint:disable=protected-access
+    while not queue_manager._log_queue.empty():  # pylint:disable=protected-access
         continue
     queue_manager.manager.shutdown()
+
+
+class FaceswapError(Exception):
+    """ Faceswap Error for handling specific errors with useful information """
+    pass  # pylint:disable=unnecessary-pass
 
 
 class GetModel():
@@ -313,7 +340,7 @@ class GetModel():
         """
 
     def __init__(self, model_filename, cache_dir, git_model_id):
-        self.logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+        self.logger = logging.getLogger(__name__)  # pylint:disable=invalid-name
         if not isinstance(model_filename, list):
             model_filename = [model_filename]
         self.model_filename = model_filename

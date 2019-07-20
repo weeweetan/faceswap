@@ -15,14 +15,23 @@ INSTALL_FAILED = False
 # Revisions of tensorflow-gpu and cuda/cudnn requirements
 TENSORFLOW_REQUIREMENTS = {"==1.12.0": ["9.0", "7.2"],
                            ">=1.13.1,<1.14": ["10.0", "7.4"]}  # TF 1.14+ Not currently supported
+# Mapping of Python packages to their conda names if different from pypi or in non-default channel
+CONDA_MAPPING = {"opencv-python": ("opencv", "conda-forge"),
+                 "fastcluster": ("fastcluster", "conda-forge"),
+                 "toposort": ("toposort", "conda-forge"),
+                 "imageio-ffmpeg": ("imageio-ffmpeg", "conda-forge")}
 
 
 class Environment():
     """ The current install environment """
-    def __init__(self):
+    def __init__(self, logger=None, updater=False):
+        """ logger will override built in Output() function if passed in
+            updater indicates that this is being run from update_deps.py
+            so certain steps can be skipped/output limited """
         self.macos_required_packages = ["pynvx==0.0.4"]
         self.conda_required_packages = [("tk", )]
-        self.output = Output()
+        self.output = logger if logger else Output()
+        self.updater = updater
         # Flag that setup is being run by installer so steps can be skipped
         self.is_installer = False
         self.cuda_path = ""
@@ -122,6 +131,8 @@ class Environment():
 
     def check_permission(self):
         """ Check for Admin permissions """
+        if self.updater:
+            return
         if self.is_admin:
             self.output.info("Running as Root/Admin")
         else:
@@ -129,10 +140,11 @@ class Environment():
 
     def check_system(self):
         """ Check the system """
-        self.output.info("The tool provides tips for installation\n"
-                         "and installs required python packages")
+        if not self.updater:
+            self.output.info("The tool provides tips for installation\n"
+                             "and installs required python packages")
         self.output.info("Setup in %s %s" % (self.os_version[0], self.os_version[1]))
-        if not self.os_version[0] in ["Windows", "Linux", "Darwin"]:
+        if not self.updater and not self.os_version[0] in ["Windows", "Linux", "Darwin"]:
             self.output.error("Your system %s is not supported!" % self.os_version[0])
             exit(1)
 
@@ -142,7 +154,7 @@ class Environment():
                                                             self.py_version[1]))
         if not (self.py_version[0].split(".")[0] == "3"
                 and self.py_version[0].split(".")[1] in ("3", "4", "5", "6", "7")
-                and self.py_version[1] == "64bit"):
+                and self.py_version[1] == "64bit") and not self.updater:
             self.output.error("Please run this script with Python version 3.3, 3.4, 3.5, 3.6 or "
                               "3.7 64bit and try again.")
             exit(1)
@@ -157,6 +169,8 @@ class Environment():
 
     def check_pip(self):
         """ Check installed pip version """
+        if self.updater:
+            return
         try:
             import pip  # noqa pylint:disable=unused-import
         except ImportError:
@@ -508,6 +522,8 @@ class Checks():
         """ Return the checkfile locations for linux """
         chk = os.popen("ldconfig -p | grep -P \"libcudnn.so.\\d+\" | head -n 1").read()
         chk = chk.strip().replace("libcudnn.so.", "")
+        if not chk:
+            return list()
         cudnn_vers = chk[0]
         cudnn_path = chk[chk.find("=>") + 3:chk.find("libcudnn") - 1]
         cudnn_path = cudnn_path.replace("lib", "include")
@@ -527,14 +543,20 @@ class Checks():
 class Install():
     """ Install the requirements """
     def __init__(self, environment):
-        self.output = Output()
+        self.output = environment.output
         self.env = environment
 
-        if not self.env.is_installer:
+        if not self.env.is_installer and not self.env.updater:
             self.ask_continue()
         self.check_missing_dep()
         self.check_conda_missing_dep()
+        if (self.env.updater and
+                not self.env.missing_packages and not self.env.conda_missing_packages):
+            self.output.info("All Dependencies are up to date")
+            return
         self.install_missing_dep()
+        if self.env.updater:
+            return
         self.output.info("All python3 dependencies are met.\r\nYou are good to go.\r\n\r\n"
                          "Enter:  'python faceswap.py -h' to see the options\r\n"
                          "        'python faceswap.py gui' to launch the GUI")
@@ -555,6 +577,9 @@ class Install():
             if pkg is None:
                 continue
             key = pkg.split("==")[0]
+            if self.env.is_conda:
+                # Get Conda alias for Key
+                key = CONDA_MAPPING.get(key, (key, None))[0]
             if key not in self.env.installed_packages:
                 self.env.missing_packages.append(pkg)
                 continue
@@ -605,8 +630,11 @@ class Install():
         self.output.info("Installing Required Python Packages. This may take some time...")
         for pkg in self.env.missing_packages:
             if self.env.is_conda:
-                verbose = pkg.startswith("tensorflow")
-                if self.conda_installer(pkg, verbose=verbose):
+                verbose = pkg.startswith("tensorflow") or self.env.updater
+                pkg = CONDA_MAPPING.get(pkg, (pkg, None))
+                channel = None if len(pkg) != 2 else pkg[1]
+                pkg = pkg[0]
+                if self.conda_installer(pkg, verbose=verbose, channel=channel, conda_only=False):
                     continue
             self.pip_installer(pkg)
 
@@ -621,18 +649,19 @@ class Install():
         """ Install a conda package """
         success = True
         condaexe = ["conda", "install", "-y"]
-        if not verbose:
+        if not verbose or self.env.updater:
             condaexe.append("-q")
         if channel:
             condaexe.extend(["-c", channel])
         condaexe.append(package)
         self.output.info("Installing {}".format(package))
+        shell = self.env.os_version[0] == "Windows"
         try:
             if verbose:
-                run(condaexe, check=True)
+                run(condaexe, check=True, shell=shell)
             else:
                 with open(os.devnull, "w") as devnull:
-                    run(condaexe, stdout=devnull, stderr=devnull, check=True)
+                    run(condaexe, stdout=devnull, stderr=devnull, check=True, shell=shell)
         except CalledProcessError:
             if not conda_only:
                 self.output.info("{} not available in Conda. Installing with pip".format(package))
@@ -646,7 +675,9 @@ class Install():
         """ Install a pip package """
         pipexe = [sys.executable, "-m", "pip"]
         # hide info/warning and fix cache hang
-        pipexe.extend(["install", "-qq", "--no-cache-dir"])
+        pipexe.extend(["install", "--no-cache-dir"])
+        if not self.env.updater:
+            pipexe.append("-qq")
         # install as user to solve perm restriction
         if not self.env.is_admin and not self.env.is_virtualenv:
             pipexe.append("--user")

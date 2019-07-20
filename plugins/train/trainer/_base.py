@@ -14,6 +14,7 @@
         mask_type:          Type of mask to use. See lib.model.masks for valid mask names.
                             Set to None for not used
         no_logs:            Disable tensorboard logging
+        snapshot_interval:  Interval for saving model snapshots
         warp_to_landmarks:  Use random_warp_landmarks instead of random_warp
         augment_color:      Perform random shifting of L*a*b* colors
         no_flip:            Don't perform a random flip on the image
@@ -28,11 +29,12 @@ import cv2
 import numpy as np
 
 import tensorflow as tf
+from tensorflow.python import errors_impl as tf_errors  # pylint:disable=no-name-in-module
 
 from lib.alignments import Alignments
 from lib.faces_detect import DetectedFace
 from lib.training_data import TrainingDataGenerator, stack_images
-from lib.utils import get_folder, get_image_paths
+from lib.utils import FaceswapError, get_folder, get_image_paths
 from plugins.train._config import Config
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -152,13 +154,11 @@ class TrainerBase():
     def print_loss(self, loss):
         """ Override for specific model loss formatting """
         logger.trace(loss)
-        output = list()
-        for side in sorted(list(loss.keys())):
-            display = ", ".join(["{}_{}: {:.5f}".format(self.model.state.loss_names[side][idx],
-                                                        side.capitalize(),
-                                                        this_loss)
-                                 for idx, this_loss in enumerate(loss[side])])
-            output.append(display)
+        output = [", ".join(["{}_{}: {:.5f}".format(self.model.state.loss_names[side][idx],
+                                                    side.capitalize(),
+                                                    this_loss)
+                             for idx, this_loss in enumerate(loss[side])])
+                  for side in sorted(list(loss.keys()))]
         output = ", ".join(output)
         print("[{}] [#{:05d}] {}".format(self.timestamp, self.model.iterations, output), end='\r')
 
@@ -167,38 +167,51 @@ class TrainerBase():
         logger.trace("Training one step: (iteration: %s)", self.model.iterations)
         do_preview = viewer is not None
         do_timelapse = timelapse_kwargs is not None
+        snapshot_interval = self.model.training_opts.get("snapshot_interval", 0)
+        do_snapshot = (snapshot_interval != 0 and
+                       self.model.iterations >= snapshot_interval and
+                       self.model.iterations % snapshot_interval == 0)
         loss = dict()
-        for side, batcher in self.batchers.items():
-            if self.pingpong.active and side != self.pingpong.side:
-                continue
-            loss[side] = batcher.train_one_batch(do_preview)
-            if not do_preview and not do_timelapse:
-                continue
+        try:
+            for side, batcher in self.batchers.items():
+                if self.pingpong.active and side != self.pingpong.side:
+                    continue
+                loss[side] = batcher.train_one_batch(do_preview)
+                if not do_preview and not do_timelapse:
+                    continue
+                if do_preview:
+                    self.samples.images[side] = batcher.compile_sample(None)
+                if do_timelapse:
+                    self.timelapse.get_sample(side, timelapse_kwargs)
+
+            self.model.state.increment_iterations()
+
+            for side, side_loss in loss.items():
+                self.store_history(side, side_loss)
+                self.log_tensorboard(side, side_loss)
+
+            if not self.pingpong.active:
+                self.print_loss(loss)
+            else:
+                for key, val in loss.items():
+                    self.pingpong.loss[key] = val
+                self.print_loss(self.pingpong.loss)
+
             if do_preview:
-                self.samples.images[side] = batcher.compile_sample(None)
+                samples = self.samples.show_sample()
+                if samples is not None:
+                    viewer(samples, "Training - 'S': Save Now. 'ENTER': Save and Quit")
+
             if do_timelapse:
-                self.timelapse.get_sample(side, timelapse_kwargs)
+                self.timelapse.output_timelapse()
 
-        self.model.state.increment_iterations()
-
-        for side, side_loss in loss.items():
-            self.store_history(side, side_loss)
-            self.log_tensorboard(side, side_loss)
-
-        if not self.pingpong.active:
-            self.print_loss(loss)
-        else:
-            for key, val in loss.items():
-                self.pingpong.loss[key] = val
-            self.print_loss(self.pingpong.loss)
-
-        if do_preview:
-            samples = self.samples.show_sample()
-            if samples is not None:
-                viewer(samples, "Training - 'S': Save Now. 'ENTER': Save and Quit")
-
-        if do_timelapse:
-            self.timelapse.output_timelapse()
+            if do_snapshot:
+                self.model.do_snapshot()
+        except Exception as err:
+            #  Shutdown the FixedProducerDispatchers then continue to raise error
+            for batcher in self.batchers.values():
+                batcher.shutdown_feed()
+            raise err
 
     def store_history(self, side, loss):
         """ Store the history of this step """
@@ -239,7 +252,10 @@ class Batcher():
         self.samples = None
         self.mask = None
 
-        self.feed = self.load_generator().minibatch_ab(images, batch_size, self.side)
+        generator = self.load_generator()
+        self.feed = generator.minibatch_ab(images, batch_size, self.side)
+        self.shutdown_feed = generator.join_subprocess
+
         self.preview_feed = None
         self.timelapse_feed = None
 
@@ -259,7 +275,20 @@ class Batcher():
         """ Train a batch """
         logger.trace("Training one step: (side: %s)", self.side)
         batch = self.get_next(do_preview)
-        loss = self.model.predictors[self.side].train_on_batch(*batch)
+        try:
+            loss = self.model.predictors[self.side].train_on_batch(*batch)
+        except tf_errors.ResourceExhaustedError as err:
+            msg = ("You do not have enough GPU memory available to train the selected model at "
+                   "the selected settings. You can try a number of things:"
+                   "\n1) Close any other application that is using your GPU (web browsers are "
+                   "particularly bad for this)."
+                   "\n2) Lower the batchsize (the amount of images fed into the model each "
+                   "iteration)."
+                   "\n3) Try 'Memory Saving Gradients' and/or 'Optimizer Savings' and/or 'Ping "
+                   "Pong Training'."
+                   "\n4) Use a more lightweight model, or select the model's 'LowMem' option "
+                   "(in config) if it has one.")
+            raise FaceswapError(msg) from err
         loss = loss if isinstance(loss, list) else [loss]
         return loss
 

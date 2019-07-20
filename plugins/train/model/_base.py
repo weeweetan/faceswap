@@ -10,20 +10,20 @@ import sys
 import time
 
 from json import JSONDecodeError
-from shutil import copyfile, copytree
 
 import keras
 from keras import losses
 from keras import backend as K
 from keras.models import load_model, Model
-from keras.optimizers import Adam
 from keras.utils import get_custom_objects, multi_gpu_model
 
 from lib import Serializer
+from lib.model.backup_restore import Backup
 from lib.model.losses import DSSIMObjective, PenalizedLoss
 from lib.model.nn_blocks import NNBlocks
+from lib.model.optimizers import Adam
 from lib.multithreading import MultiThread
-from lib.utils import get_folder
+from lib.utils import deprecation_warning, FaceswapError
 from plugins.train._config import Config
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
@@ -36,6 +36,7 @@ class ModelBase():
                  model_dir,
                  gpus,
                  configfile=None,
+                 snapshot_interval=0,
                  no_logs=False,
                  warp_to_landmarks=False,
                  augment_color=True,
@@ -48,35 +49,44 @@ class ModelBase():
                  trainer="original",
                  pingpong=False,
                  memory_saving_gradients=False,
+                 optimizer_savings="none",
                  predict=False):
         logger.debug("Initializing ModelBase (%s): (model_dir: '%s', gpus: %s, configfile: %s, "
-                     "no_logs: %s, warp_to_landmarks: %s, augment_color: %s, no_flip: %s, "
-                     "training_image_size, %s, alignments_paths: %s, preview_scale: %s, "
-                     "input_shape: %s, encoder_dim: %s, trainer: %s, pingpong: %s, "
-                     "memory_saving_gradients: %s, predict: %s)",
-                     self.__class__.__name__, model_dir, gpus, configfile, no_logs,
-                     warp_to_landmarks, augment_color, no_flip, training_image_size,
+                     "snapshot_interval: %s, no_logs: %s, warp_to_landmarks: %s, augment_color: "
+                     "%s, no_flip: %s, training_image_size, %s, alignments_paths: %s, "
+                     "preview_scale: %s, input_shape: %s, encoder_dim: %s, trainer: %s, "
+                     "pingpong: %s, memory_saving_gradients: %s, optimizer_savings: %s, "
+                     "predict: %s)",
+                     self.__class__.__name__, model_dir, gpus, configfile, snapshot_interval,
+                     no_logs, warp_to_landmarks, augment_color, no_flip, training_image_size,
                      alignments_paths, preview_scale, input_shape, encoder_dim, trainer, pingpong,
-                     memory_saving_gradients, predict)
+                     memory_saving_gradients, optimizer_savings, predict)
 
         self.predict = predict
         self.model_dir = model_dir
+
+        self.backup = Backup(self.model_dir, self.name)
         self.gpus = gpus
         self.configfile = configfile
-        self.blocks = NNBlocks(use_subpixel=self.config["subpixel_upscaling"],
-                               use_icnr_init=self.config["icnr_init"],
-                               use_reflect_padding=self.config["reflect_padding"])
         self.input_shape = input_shape
         self.output_shape = None  # set after model is compiled
         self.encoder_dim = encoder_dim
         self.trainer = trainer
 
+        self.load_config()  # Load config if plugin has not already referenced it
         self.state = State(self.model_dir,
                            self.name,
                            self.config_changeable_items,
                            no_logs,
                            pingpong,
                            training_image_size)
+
+        self.blocks = NNBlocks(use_subpixel=self.config["subpixel_upscaling"],
+                               use_icnr_init=self.config["icnr_init"],
+                               use_convaware_init=self.config["conv_aware_init"],
+                               use_reflect_padding=self.config["reflect_padding"],
+                               first_run=self.state.first_run)
+
         self.is_legacy = False
         self.rename_legacy()
         self.load_state_info()
@@ -92,9 +102,16 @@ class ModelBase():
                               "warp_to_landmarks": warp_to_landmarks,
                               "augment_color": augment_color,
                               "no_flip": no_flip,
-                              "pingpong": pingpong}
+                              "pingpong": pingpong,
+                              "snapshot_interval": snapshot_interval}
 
+        self.optimizer_savings = optimizer_savings
         self.set_gradient_type(memory_saving_gradients)
+        if self.multiple_models_in_folder:
+            deprecation_warning("Support for multiple model types within the same folder",
+                                additional_info="Please split each model into separate folders to "
+                                                "avoid issues in future.")
+
         self.build()
         self.set_training_data()
         logger.debug("Initialized ModelBase (%s)", self.__class__.__name__)
@@ -137,6 +154,14 @@ class ModelBase():
         logger.debug("Pre-existing models exist: %s", retval)
         return retval
 
+    @property
+    def multiple_models_in_folder(self):
+        """ Return true if there are multiple model types in the same folder, else false """
+        model_files = [fname for fname in os.listdir(str(self.model_dir)) if fname.endswith(".h5")]
+        retval = False if not model_files else os.path.commonprefix(model_files) == ""
+        logger.debug("model_files: %s, retval: %s", model_files, retval)
+        return retval
+
     @staticmethod
     def set_gradient_type(memory_saving_gradients):
         """ Monkeypatch Memory Saving Gradients if requested """
@@ -145,6 +170,14 @@ class ModelBase():
         logger.info("Using Memory Saving Gradients")
         from lib.model import memory_saving_gradients
         K.__dict__["gradients"] = memory_saving_gradients.gradients_memory
+
+    def load_config(self):
+        """ Load the global config for reference in self.config """
+        global _CONFIG  # pylint: disable=global-statement
+        if not _CONFIG:
+            model_name = self.config_section
+            logger.debug("Loading config for: %s", model_name)
+            _CONFIG = Config(model_name, configfile=self.configfile).config_dict
 
     def set_training_data(self):
         """ Override to set model specific training data.
@@ -171,7 +204,18 @@ class ModelBase():
         """ Build the model. Override for custom build methods """
         self.add_networks()
         self.load_models(swapped=False)
-        self.build_autoencoders()
+        try:
+            self.build_autoencoders()
+        except ValueError as err:
+            if "must be from the same graph" in str(err).lower():
+                msg = ("There was an error loading saved weights. This is most likely due to "
+                       "model corruption during a previous save."
+                       "\nYou should restore weights from a snapshot or from backup files. "
+                       "You can use the 'Restore' Tool to restore from backup.")
+                raise FaceswapError(msg) from err
+            if "multi_gpu_model" in str(err).lower():
+                raise FaceswapError(str(err)) from err
+            raise err
         self.log_summary()
         self.compile_predictors(initialize=True)
 
@@ -204,9 +248,10 @@ class ModelBase():
         logger.debug("Setting input shape from state file: %s", input_shape)
         self.input_shape = input_shape
 
-    def add_network(self, network_type, side, network):
+    def add_network(self, network_type, side, network, is_output=False):
         """ Add a NNMeta object """
-        logger.debug("network_type: '%s', side: '%s', network: '%s'", network_type, side, network)
+        logger.debug("network_type: '%s', side: '%s', network: '%s', is_output: %s",
+                     network_type, side, network, is_output)
         filename = "{}_{}".format(self.name, network_type.lower())
         name = network_type.lower()
         if side:
@@ -215,7 +260,11 @@ class ModelBase():
             name += "_{}".format(side)
         filename += ".h5"
         logger.debug("name: '%s', filename: '%s'", name, filename)
-        self.networks[name] = NNMeta(str(self.model_dir / filename), network_type, side, network)
+        self.networks[name] = NNMeta(str(self.model_dir / filename),
+                                     network_type,
+                                     side,
+                                     network,
+                                     is_output)
 
     def add_predictor(self, side, model):
         """ Add a predictor to the predictors dictionary """
@@ -300,7 +349,7 @@ class ModelBase():
             # TODO: Remove this as soon it is fixed in PlaidML.
             opt_kwargs["clipnorm"] = 1.0
         logger.debug("Optimizer kwargs: %s", opt_kwargs)
-        return Adam(**opt_kwargs)
+        return Adam(**opt_kwargs, cpu_mode=self.optimizer_savings)
 
     def loss_function(self, mask, side, initialize):
         """ Set the loss function
@@ -374,6 +423,12 @@ class ModelBase():
                 logger.verbose("%s:", name.title())
                 nnmeta.network.summary(print_fn=lambda x: logger.verbose("R|%s", x))
 
+    def do_snapshot(self):
+        """ Perform a model snapshot """
+        logger.debug("Performing snapshot")
+        self.backup.snapshot_models(self.iterations)
+        logger.debug("Performed snapshot")
+
     def load_models(self, swapped):
         """ Load models from file """
         logger.debug("Load model: (swapped: %s)", swapped)
@@ -399,80 +454,79 @@ class ModelBase():
             logger.info("Loaded model from disk: '%s'", self.model_dir)
         return is_loaded
 
-    def save_models(self, snapshot_iteration):
+    def save_models(self):
         """ Backup and save the models """
         logger.debug("Backing up and saving models")
-        should_backup = self.get_save_averages()
+        save_averages = self.get_save_averages()
+        backup_func = self.backup.backup_model if self.should_backup(save_averages) else None
+        if backup_func:
+            logger.info("Backing up models...")
         save_threads = list()
         for network in self.networks.values():
             name = "save_{}".format(network.name)
             save_threads.append(MultiThread(network.save,
                                             name=name,
-                                            should_backup=should_backup))
+                                            backup_func=backup_func))
         save_threads.append(MultiThread(self.state.save,
                                         name="save_state",
-                                        should_backup=should_backup))
+                                        backup_func=backup_func))
         for thread in save_threads:
             thread.start()
         for thread in save_threads:
             if thread.has_error:
                 logger.error(thread.errors[0])
             thread.join()
-        logger.info("saved models")
-        if snapshot_iteration:
-            self.snapshot_models()
-
-    def snapshot_models(self):
-        """ Take a snapshot of the model at current state and back up """
-        logger.info("Saving snapshot")
-        src = str(self.model_dir)
-        dst = str(get_folder("{}_snapshot_{}_iters".format(src, self.iterations)))
-        for filename in os.listdir(src):
-            if filename.endswith(".bk"):
-                continue
-            srcfile = os.path.join(src, filename)
-            dstfile = os.path.join(dst, filename)
-            copyfunc = copytree if os.path.isdir(srcfile) else copyfile
-            logger.debug("Saving snapshot: '%s' > '%s'", srcfile, dstfile)
-            copyfunc(srcfile, dstfile)
-        logger.info("Saved snapshot")
+        msg = "[Saved models]"
+        if save_averages:
+            lossmsg = ["{}_{}: {:.5f}".format(self.state.loss_names[side][0],
+                                              side.capitalize(),
+                                              save_averages[side])
+                       for side in sorted(list(save_averages.keys()))]
+            msg += " - Average since last save: {}".format(", ".join(lossmsg))
+        logger.info(msg)
 
     def get_save_averages(self):
-        """ Return the loss averages since last save and reset historical losses
+        """ Return the average loss since the last save iteration and reset historical loss """
+        logger.debug("Getting save averages")
+        avgs = dict()
+        for side, loss in self.history.items():
+            if not loss:
+                logger.debug("No loss in self.history: %s", side)
+                break
+            avgs[side] = sum(loss) / len(loss)
+            self.history[side] = list()  # Reset historical loss
+        logger.debug("Average losses since last save: %s", avgs)
+        return avgs
+
+    def should_backup(self, save_averages):
+        """ Check whether the loss averages for all losses is the lowest that has been seen.
 
             This protects against model corruption by only backing up the model
             if any of the loss values have fallen.
             TODO This is not a perfect system. If the model corrupts on save_iteration - 1
             then model may still backup
         """
-        logger.debug("Getting Average loss since last save")
-        avgs = dict()
         backup = True
 
-        for side, loss in self.history.items():
-            if not loss:
-                backup = False
-                break
+        if not save_averages:
+            logger.debug("No save averages. Not backing up")
+            return False
 
-            avgs[side] = sum(loss) / len(loss)
-            self.history[side] = list()  # Reset historical loss
-
+        for side, loss in save_averages.items():
             if not self.state.lowest_avg_loss.get(side, None):
                 logger.debug("Setting initial save iteration loss average for '%s': %s",
-                             side, avgs[side])
-                self.state.lowest_avg_loss[side] = avgs[side]
+                             side, loss)
+                self.state.lowest_avg_loss[side] = loss
                 continue
-
             if backup:
                 # Only run this if backup is true. All losses must have dropped for a valid backup
-                backup = self.check_loss_drop(side, avgs[side])
+                backup = self.check_loss_drop(side, loss)
 
         logger.debug("Lowest historical save iteration loss average: %s",
                      self.state.lowest_avg_loss)
-        logger.debug("Average loss since last save: %s", avgs)
 
         if backup:  # Update lowest loss values to the state
-            for side, avg_loss in avgs.items():
+            for side, avg_loss in save_averages.items():
                 logger.debug("Updating lowest save iteration average for '%s': %s", side, avg_loss)
                 self.state.lowest_avg_loss[side] = avg_loss
 
@@ -551,22 +605,29 @@ class NNMeta():
                 Otherwise the type should be completely unique.
     side:       A, B or None. Used to identify which networks can
                 be swapped.
-    network:      Define network to this.
+    network:    Define network to this.
+    is_output:  Set to True to indicate that this network is an output to the Autoencoder
     """
 
-    def __init__(self, filename, network_type, side, network):
+    def __init__(self, filename, network_type, side, network, is_output):
         logger.debug("Initializing %s: (filename: '%s', network_type: '%s', side: '%s', "
-                     "network: %s", self.__class__.__name__, filename, network_type,
-                     side, network)
+                     "network: %s, is_output: %s", self.__class__.__name__, filename,
+                     network_type, side, network, is_output)
         self.filename = filename
         self.type = network_type.lower()
         self.side = side
         self.name = self.set_name()
         self.network = network
+        self.is_output = is_output
         self.network.name = self.name
         self.config = network.get_config()  # For pingpong restore
         self.weights = network.get_weights()  # For pingpong restore
         logger.debug("Initialized %s", self.__class__.__name__)
+
+    @property
+    def output_shapes(self):
+        """ Return the output shapes from the stored network """
+        return [K.int_shape(output) for output in self.network.outputs]
 
     def set_name(self):
         """ Set the network name """
@@ -597,30 +658,20 @@ class NNMeta():
         self.network.name = self.type
         return True
 
-    def save(self, fullpath=None, should_backup=False):
+    def save(self, fullpath=None, backup_func=None):
         """ Save model """
         fullpath = fullpath if fullpath else self.filename
-        if should_backup:
-            self.backup(fullpath=fullpath)
+        if backup_func:
+            backup_func(fullpath)
         logger.debug("Saving model: '%s'", fullpath)
         self.weights = self.network.get_weights()
         self.network.save(fullpath)
-
-    def backup(self, fullpath=None):
-        """ Backup Model """
-        origfile = fullpath if fullpath else self.filename
-        backupfile = origfile + ".bk"
-        logger.debug("Backing up: '%s' to '%s'", origfile, backupfile)
-        if os.path.exists(backupfile):
-            os.remove(backupfile)
-        if os.path.exists(origfile):
-            os.rename(origfile, backupfile)
 
     def convert_legacy_weights(self):
         """ Convert legacy weights files to hold the model topology """
         logger.info("Adding model topology to legacy weights file: '%s'", self.filename)
         self.network.load_weights(self.filename)
-        self.save(should_backup=False)
+        self.save(backup_func=None)
         self.network.name = self.type
 
 
@@ -667,6 +718,11 @@ class State():
     def current_session(self):
         """ Return the current session dict """
         return self.sessions[self.session_id]
+
+    @property
+    def first_run(self):
+        """ Return True if this is the first run else False """
+        return self.session_id == 1
 
     def new_session_id(self):
         """ Return new session_id """
@@ -723,11 +779,11 @@ class State():
         except JSONDecodeError as err:
             logger.debug("JSONDecodeError: %s:", str(err))
 
-    def save(self, should_backup=False):
+    def save(self, backup_func=None):
         """ Save iteration number to state file """
         logger.debug("Saving State")
-        if should_backup:
-            self.backup()
+        if backup_func:
+            backup_func(self.filename)
         try:
             with open(self.filename, "wb") as out:
                 state = {"name": self.name,
@@ -742,16 +798,6 @@ class State():
         except IOError as err:
             logger.error("Unable to save model state: %s", str(err.strerror))
         logger.debug("Saved State")
-
-    def backup(self):
-        """ Backup state file """
-        origfile = self.filename
-        backupfile = origfile + ".bk"
-        logger.debug("Backing up: '%s' to '%s'", origfile, backupfile)
-        if os.path.exists(backupfile):
-            os.remove(backupfile)
-        if os.path.exists(origfile):
-            os.rename(origfile, backupfile)
 
     def replace_config(self, config_changeable_items):
         """ Replace the loaded config with the one contained within the state file
