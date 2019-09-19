@@ -8,10 +8,9 @@ from pathlib import Path
 
 from tqdm import tqdm
 
-from lib.faces_detect import DetectedFace
 from lib.multithreading import MultiThread
 from lib.queue_manager import queue_manager
-from lib.utils import get_folder, hash_encode_image
+from lib.utils import get_folder, hash_encode_image, deprecation_warning
 from plugins.extract.pipeline import Extractor
 from scripts.fsmedia import Alignments, Images, PostProcess, Utils
 
@@ -34,7 +33,6 @@ class Extract():
         normalization = None if self.args.normalization == "none" else self.args.normalization
         self.extractor = Extractor(self.args.detector,
                                    self.args.aligner,
-                                   self.args.loglevel,
                                    configfile=configfile,
                                    multiprocess=not self.args.singleprocess,
                                    rotate_images=self.args.rotate_images,
@@ -179,6 +177,10 @@ class Extract():
         to_process = self.process_item_count()
         size = self.args.size if hasattr(self.args, "size") else 256
         align_eyes = self.args.align_eyes if hasattr(self.args, "align_eyes") else False
+        if align_eyes:
+            deprecation_warning("Align eyes (-ae --align-eyes)",
+                                additional_info="This functionality will still be available "
+                                                "within the alignments tool.")
         exception = False
 
         for phase in range(self.extractor.passes):
@@ -239,15 +241,11 @@ class Extract():
         """ Align the detected face and add the destination file path """
         final_faces = list()
         image = faces["image"]
-        landmarks = faces["landmarks"]
         detected_faces = faces["detected_faces"]
-        for idx, face in enumerate(detected_faces):
-            detected_face = DetectedFace()
-            detected_face.from_bounding_box_dict(face, image)
-            detected_face.landmarksXY = landmarks[idx]
-            detected_face.load_aligned(image, size=size, align_eyes=align_eyes)
+        for face in detected_faces:
+            face.load_aligned(image, size=size, align_eyes=align_eyes)
             final_faces.append({"file_location": self.output_dir / Path(filename).stem,
-                                "face": detected_face})
+                                "face": face})
         faces["detected_faces"] = final_faces
 
     def output_faces(self, filename, faces):
