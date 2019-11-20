@@ -11,13 +11,11 @@ from pathlib import Path
 
 import cv2
 import imageio
-import numpy as np
 
-from lib.aligner import Extract as AlignerExtract
 from lib.alignments import Alignments as AlignmentsBase
 from lib.face_filter import FaceFilter as FilterFunc
-from lib.utils import (camel_case_split, count_frames_and_secs, cv2_read_img, get_folder,
-                       get_image_paths, set_system_verbosity, _video_extensions)
+from lib.image import count_frames, read_image
+from lib.utils import (camel_case_split, get_image_paths, set_system_verbosity, _video_extensions)
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -56,10 +54,8 @@ class Alignments(AlignmentsBase):
         self.args = arguments
         self.is_extract = is_extract
         folder, filename = self.set_folder_filename(input_is_video)
-        serializer = self.set_serializer()
         super().__init__(folder,
-                         filename=filename,
-                         serializer=serializer)
+                         filename=filename)
         logger.debug("Initialized %s", self.__class__.__name__)
 
     def set_folder_filename(self, input_is_video):
@@ -77,19 +73,6 @@ class Alignments(AlignmentsBase):
             filename = "alignments"
         logger.debug("Setting Alignments: (folder: '%s' filename: '%s')", folder, filename)
         return folder, filename
-
-    def set_serializer(self):
-        """ Set the serializer to be used for loading and
-            saving alignments """
-        if hasattr(self.args, "serializer") and self.args.serializer:
-            logger.debug("Serializer provided: '%s'", self.args.serializer)
-            serializer = self.args.serializer
-        else:
-            # If there is a full filename then this will be overriden
-            # by filename extension
-            serializer = "json"
-            logger.debug("No Serializer defaulting to: '%s'", serializer)
-        return serializer
 
     def load(self):
         """ Override  parent loader to handle skip existing on extract """
@@ -113,12 +96,7 @@ class Alignments(AlignmentsBase):
             logger.warning("Skip Existing/Skip Faces selected, but no alignments file found!")
             return data
 
-        try:
-            with open(self.file, self.serializer.roptions) as align:
-                data = self.serializer.unmarshal(align.read())
-        except IOError as err:
-            logger.error("Error: '%s' not read: %s", self.file, err.strerror)
-            exit(1)
+        data = self.serializer.load(self.file)
 
         if skip_faces:
             # Remove items from algnments that have no faces so they will
@@ -145,7 +123,7 @@ class Images():
     def count_images(self):
         """ Number of images or frames """
         if self.is_video:
-            retval = int(count_frames_and_secs(self.args.input_dir)[0])
+            retval = int(count_frames(self.args.input_dir, fast=True))
         else:
             retval = len(self.input_images)
         return retval
@@ -183,7 +161,7 @@ class Images():
         """ Load frames from disk """
         logger.debug("Input is separate Frames. Loading images")
         for filename in self.input_images:
-            image = cv2_read_img(filename, raise_error=False)
+            image = read_image(filename, raise_error=False)
             if image is None:
                 continue
             yield filename, image
@@ -192,7 +170,7 @@ class Images():
         """ Return frames from a video file """
         logger.debug("Input is video. Capturing frames")
         vidname = os.path.splitext(os.path.basename(self.args.input_dir))[0]
-        reader = imageio.get_reader(self.args.input_dir)
+        reader = imageio.get_reader(self.args.input_dir, "ffmpeg")
         for i, frame in enumerate(reader):
             # Convert to BGR for cv2 compatibility
             frame = frame[:, :, ::-1]
@@ -212,13 +190,13 @@ class Images():
                 logger.trace("Extracted frame_no %s from filename '%s'", frame_no, filename)
             retval = self.load_one_video_frame(int(frame_no))
         else:
-            retval = cv2_read_img(filename, raise_error=True)
+            retval = read_image(filename, raise_error=True)
         return retval
 
     def load_one_video_frame(self, frame_no):
         """ Load a single frame from a video file """
         logger.trace("Loading video frame: %s", frame_no)
-        reader = imageio.get_reader(self.args.input_dir)
+        reader = imageio.get_reader(self.args.input_dir, "ffmpeg")
         reader.set_image_index(frame_no - 1)
         frame = reader.get_next_data()[:, :, ::-1]
         reader.close()
@@ -258,14 +236,8 @@ class PostProcess():
         """ Set the post processing actions """
         postprocess_items = dict()
         # Debug Landmarks
-        if (hasattr(self.args, 'debug_landmarks')
-                and self.args.debug_landmarks):
+        if (hasattr(self.args, 'debug_landmarks') and self.args.debug_landmarks):
             postprocess_items["DebugLandmarks"] = None
-
-        # Blurry Face
-        if hasattr(self.args, 'blur_thresh') and self.args.blur_thresh:
-            kwargs = {"blur_thresh": self.args.blur_thresh}
-            postprocess_items["BlurryFaceFilter"] = {"kwargs": kwargs}
 
         # Face Filter post processing
         if ((hasattr(self.args, "filter") and self.args.filter is not None) or
@@ -319,79 +291,18 @@ class PostProcessAction():  # pylint: disable=too-few-public-methods
         raise NotImplementedError
 
 
-class BlurryFaceFilter(PostProcessAction):  # pylint: disable=too-few-public-methods
-    """ Move blurry faces to a different folder
-        Extract Only """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.blur_thresh = kwargs["blur_thresh"]
-        logger.debug("Initialized %s", self.__class__.__name__)
-
-    def process(self, output_item):
-        """ Detect and move blurry face """
-        extractor = AlignerExtract()
-
-        for idx, detected_face in enumerate(output_item["detected_faces"]):
-            frame_name = detected_face["file_location"].parts[-1]
-            face = detected_face["face"]
-            logger.trace("Checking for blurriness. Frame: '%s', Face: %s", frame_name, idx)
-            aligned_landmarks = face.aligned_landmarks
-            resized_face = face.aligned_face
-            size = face.aligned["size"]
-            padding = int(size * 0.1875)
-            feature_mask = extractor.get_feature_mask(
-                aligned_landmarks / size,
-                size, padding)
-            feature_mask = cv2.blur(  # pylint: disable=no-member
-                feature_mask, (10, 10))
-            isolated_face = cv2.multiply(  # pylint: disable=no-member
-                feature_mask,
-                resized_face.astype(float)).astype(np.uint8)
-            blurry, focus_measure = self.is_blurry(isolated_face)
-
-            if blurry:
-                blur_folder = detected_face["file_location"].parts[:-1]
-                blur_folder = get_folder(Path(*blur_folder) / Path("blurry"))
-                detected_face["file_location"] = blur_folder / Path(frame_name)
-                logger.verbose("%s's focus measure of %s was below the blur threshold, "
-                               "moving to 'blurry'", frame_name, "{0:.2f}".format(focus_measure))
-
-    def is_blurry(self, image):
-        """ Convert to grayscale, and compute the focus measure of the image using the
-            Variance of Laplacian method """
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)  # pylint: disable=no-member
-        focus_measure = self.variance_of_laplacian(gray)
-
-        # if the focus measure is less than the supplied threshold,
-        # then the image should be considered "blurry"
-        retval = (focus_measure < self.blur_thresh, focus_measure)
-        logger.trace("Returning: (is_blurry: %s, focus_measure %s)", retval[0], retval[1])
-        return retval
-
-    @staticmethod
-    def variance_of_laplacian(image):
-        """ Compute the Laplacian of the image and then return the focus
-            measure, which is simply the variance of the Laplacian """
-        retval = cv2.Laplacian(image, cv2.CV_64F).var()  # pylint: disable=no-member
-        logger.trace("Returning: %s", retval)
-        return retval
-
-
 class DebugLandmarks(PostProcessAction):  # pylint: disable=too-few-public-methods
     """ Draw debug landmarks on face
         Extract Only """
 
     def process(self, output_item):
         """ Draw landmarks on image """
-        for idx, detected_face in enumerate(output_item["detected_faces"]):
-            face = detected_face["face"]
-            logger.trace("Drawing Landmarks. Frame: '%s'. Face: %s",
-                         detected_face["file_location"].parts[-1], idx)
+        frame = os.path.splitext(os.path.basename(output_item["filename"]))[0]
+        for idx, face in enumerate(output_item["detected_faces"]):
+            logger.trace("Drawing Landmarks. Frame: '%s'. Face: %s", frame, idx)
             aligned_landmarks = face.aligned_landmarks
             for (pos_x, pos_y) in aligned_landmarks:
-                cv2.circle(  # pylint: disable=no-member
-                    face.aligned_face,
-                    (pos_x, pos_y), 2, (0, 0, 255), -1)
+                cv2.circle(face.aligned_face, (pos_x, pos_y), 2, (0, 0, 255), -1)
 
 
 class FaceFilter(PostProcessAction):

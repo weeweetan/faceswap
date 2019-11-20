@@ -51,7 +51,7 @@ _HELPTEXT = (
 
 _DEFAULTS = {
     "confidence": {
-        "default": 50,
+        "default": 70,
         "info": "The confidence level at which the detector has succesfully found a face.\n"
                 "Higher levels will be more discriminating, lower levels will have more false "
                 "positives.",
@@ -63,7 +63,7 @@ _DEFAULTS = {
         "fixed": True,
     },
     "batch-size": {
-        "default": 8,
+        "default": 4,
         "info": "The batch size to use. To a point, higher batch sizes equal better performance, "
                 "but setting it too high can harm performance.\n"
                 "\n\tNvidia users: If the batchsize is set higher than the your GPU can "

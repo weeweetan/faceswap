@@ -25,6 +25,7 @@ class Detect(Detector):
         self.vram_per_batch = 32
         self.batchsize = self.config["batch-size"]
         self.kwargs = self.validate_kwargs()
+        self.colorformat = "RGB"
 
     def validate_kwargs(self):
         """ Validate that config options are correct. If not reset to default """
@@ -53,7 +54,7 @@ class Detect(Detector):
 
     def init_model(self):
         """ Initialize S3FD Model"""
-        self.model = MTCNN(self.model_path, **self.kwargs)
+        self.model = MTCNN(self.model_path, self.config["allow_growth"], **self.kwargs)
 
     def process_input(self, batch):
         """ Compile the detection image(s) for prediction """
@@ -105,8 +106,8 @@ class Detect(Detector):
 
 class PNet(KSession):
     """ Keras PNet model for MTCNN """
-    def __init__(self, model_path):
-        super().__init__("MTCNN-PNet", model_path)
+    def __init__(self, model_path, allow_growth):
+        super().__init__("MTCNN-PNet", model_path, allow_growth=allow_growth)
         self.define_model(self.model_definition)
         self.load_model_weights()
 
@@ -128,8 +129,8 @@ class PNet(KSession):
 
 class RNet(KSession):
     """ Keras RNet model for MTCNN """
-    def __init__(self, model_path):
-        super().__init__("MTCNN-RNet", model_path)
+    def __init__(self, model_path, allow_growth):
+        super().__init__("MTCNN-RNet", model_path, allow_growth=allow_growth)
         self.define_model(self.model_definition)
         self.load_model_weights()
 
@@ -158,8 +159,8 @@ class RNet(KSession):
 
 class ONet(KSession):
     """ Keras ONet model for MTCNN """
-    def __init__(self, model_path):
-        super().__init__("MTCNN-ONet", model_path)
+    def __init__(self, model_path, allow_growth):
+        super().__init__("MTCNN-ONet", model_path, allow_growth=allow_growth)
         self.define_model(self.model_definition)
         self.load_model_weights()
 
@@ -193,7 +194,7 @@ class MTCNN():
     """ MTCNN Detector for face alignment """
     # TODO Batching for rnet and onet
 
-    def __init__(self, model_path, minsize, threshold, factor):
+    def __init__(self, model_path, allow_growth, minsize, threshold, factor):
         """
         minsize: minimum faces' size
         threshold: threshold=[th1, th2, th3], th1-3 are three steps's threshold
@@ -201,15 +202,16 @@ class MTCNN():
                 detect in the image.
         pnet, rnet, onet: caffemodel
         """
-        logger.debug("Initializing: %s: (model_path: '%s')",
-                     self.__class__.__name__, model_path)
+        logger.debug("Initializing: %s: (model_path: '%s', allow_growth: %s, minsize: %s, "
+                     "threshold: %s, factor: %s)", self.__class__.__name__, model_path,
+                     allow_growth, minsize, threshold, factor)
         self.minsize = minsize
         self.threshold = threshold
         self.factor = factor
 
-        self.pnet = PNet(model_path[0])
-        self.rnet = RNet(model_path[1])
-        self.onet = ONet(model_path[2])
+        self.pnet = PNet(model_path[0], allow_growth)
+        self.rnet = RNet(model_path[1], allow_growth)
+        self.onet = ONet(model_path[2], allow_growth)
         self._pnet_scales = None
         logger.debug("Initialized: %s", self.__class__.__name__)
 
@@ -245,8 +247,7 @@ class MTCNN():
             rwidth, rheight = int(width * scale), int(height * scale)
             batch = np.empty((batch_items, rheight, rwidth, 3), dtype="float32")
             for idx in range(batch_items):
-                batch[idx, ...] = cv2.resize(images[idx, ...],  # pylint:disable=no-member
-                                             (rwidth, rheight))
+                batch[idx, ...] = cv2.resize(images[idx, ...], (rwidth, rheight))
             output = self.pnet.predict(batch)
             cls_prob = output[0][..., 1]
             roi = output[1]
@@ -279,7 +280,7 @@ class MTCNN():
             predict_24_batch = []
             for rect in rectangles:
                 crop_img = image[int(rect[1]):int(rect[3]), int(rect[0]):int(rect[2])]
-                scale_img = cv2.resize(crop_img, (24, 24))  # pylint:disable=no-member
+                scale_img = cv2.resize(crop_img, (24, 24))
                 predict_24_batch.append(scale_img)
                 crop_number += 1
             predict_24_batch = np.array(predict_24_batch)
@@ -306,7 +307,7 @@ class MTCNN():
             predict_batch = []
             for rect in rectangles:
                 crop_img = image[int(rect[1]):int(rect[3]), int(rect[0]):int(rect[2])]
-                scale_img = cv2.resize(crop_img, (48, 48))  # pylint:disable=no-member
+                scale_img = cv2.resize(crop_img, (48, 48))
                 predict_batch.append(scale_img)
                 crop_number += 1
             predict_batch = np.array(predict_batch)
