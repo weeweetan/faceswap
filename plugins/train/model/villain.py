@@ -38,7 +38,7 @@ class Model(OriginalModel):
         tmp_x = var_x
         res_cycles = 8 if self.config.get("lowmem", False) else 16
         for _ in range(res_cycles):
-            nn_x = self.blocks.res_block(var_x, 128, **kwargs)
+            nn_x = self.blocks.res_block(var_x, in_conv_filters, **kwargs)
             var_x = nn_x
         # consider adding scale before this layer to scale the residual chain
         var_x = add([var_x, tmp_x])
@@ -78,7 +78,7 @@ class Model(OriginalModel):
                                    name="face_out")
         outputs = [var_x]
 
-        if self.config.get("mask_type", None):
+        if self.config.get("learn_mask", False):
             var_y = input_
             var_y = self.blocks.upscale(var_y, 512)
             var_y = self.blocks.upscale(var_y, 256)

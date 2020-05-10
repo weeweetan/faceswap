@@ -42,6 +42,7 @@ class FaceswapFormatter(logging.Formatter):
 
     def format(self, record):
         record.message = record.getMessage()
+        record = self.rewrite_tf_deprecation(record)
         # strip newlines
         if "\n" in record.message or "\r" in record.message:
             record.message = record.message.replace("\n", "\\n").replace("\r", "\\r")
@@ -63,6 +64,15 @@ class FaceswapFormatter(logging.Formatter):
                 msg = msg + "\n"
             msg = msg + self.formatStack(record.stack_info)
         return msg
+
+    @staticmethod
+    def rewrite_tf_deprecation(record):
+        """ Change TF deprecation messages from WARNING to DEBUG """
+        if record.levelno == 30 and (record.funcName == "_tfmw_add_deprecation_warning" or
+                                     record.module in("deprecation", "deprecation_wrapper")):
+            record.levelno = 10
+            record.levelname = "DEBUG"
+        return record
 
 
 class RollingBuffer(collections.deque):
@@ -160,14 +170,18 @@ def get_loglevel(loglevel):
 
 def crash_log():
     """ Write debug_buffer to a crash log on crash """
-    from lib.sysinfo import sysinfo
+    original_traceback = traceback.format_exc()
     path = os.path.dirname(os.path.realpath(sys.argv[0]))
     filename = os.path.join(path, datetime.now().strftime("crash_report.%Y.%m.%d.%H%M%S%f.log"))
-
     freeze_log = list(debug_buffer)
+    try:
+        from lib.sysinfo import sysinfo  # pylint:disable=import-outside-toplevel
+    except Exception:  # pylint:disable=broad-except
+        sysinfo = ("\n\nThere was an error importing System Information from lib.sysinfo. This is "
+                   "probably a bug which should be fixed:\n{}".format(traceback.format_exc()))
     with open(filename, "w") as outfile:
         outfile.writelines(freeze_log)
-        traceback.print_exc(file=outfile)
+        outfile.write(original_traceback)
         outfile.write(sysinfo)
     return filename
 

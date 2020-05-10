@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-""" Base class for Faceswap :mod:`~plugins.extract.detect` and :mod:`~plugins.extract.align`
-Plugins
+""" Base class for Faceswap :mod:`~plugins.extract.detect`, :mod:`~plugins.extract.align` and
+:mod:`~plugins.extract.mask` Plugins
 """
 import logging
 import os
 import sys
-
-import cv2
-import numpy as np
 
 from tensorflow.python import errors_impl as tf_errors  # pylint:disable=no-name-in-module
 
@@ -15,6 +12,7 @@ from lib.multithreading import MultiThread
 from lib.queue_manager import queue_manager
 from lib.utils import GetModel, FaceswapError
 from ._config import Config
+from .pipeline import ExtractMedia
 
 logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
@@ -44,7 +42,7 @@ def _get_config(plugin_name, configfile=None):
 class Extractor():
     """ Extractor Plugin Object
 
-    All ``_base`` classes for Aligners and Detectors inherit from this class.
+    All ``_base`` classes for Aligners, Detectors and Maskers inherit from this class.
 
     This class sets up a pipeline for working with ML plugins.
 
@@ -67,7 +65,10 @@ class Extractor():
     ----------------
     configfile: str, optional
         Path to a custom configuration ``ini`` file. Default: Use system configfile
-
+    instance: int, optional
+        If this plugin is being executed multiple times (i.e. multiple pipelines have been
+        launched), the instance of the plugin must be passed in for naming convention reasons.
+        Default: 0
 
     The following attributes should be set in the plugin's :func:`__init__` method after
     initializing the parent.
@@ -79,7 +80,7 @@ class Extractor():
     input_size: int
         The input size to the model in pixels across one edge. The input size should always be
         square.
-    colorformat: str
+    color_format: str
         Color format for model. Must be ``'BGR'``, ``'RGB'`` or ``'GRAY'``. Defaults to ``'BGR'``
         if not explicitly set.
     vram: int
@@ -96,14 +97,16 @@ class Extractor():
     --------
     plugins.extract.detect._base : Detector parent class for extraction plugins.
     plugins.extract.align._base : Aligner parent class for extraction plugins.
+    plugins.extract.mask._base : Masker parent class for extraction plugins.
     plugins.extract.pipeline : The extract pipeline that configures and calls all plugins
 
     """
-    def __init__(self, git_model_id=None, model_filename=None, configfile=None):
-        logger.debug("Initializing %s: (git_model_id: %s, model_filename: %s, "
-                     " configfile: %s)", self.__class__.__name__, git_model_id,
-                     model_filename, configfile)
+    def __init__(self, git_model_id=None, model_filename=None, configfile=None, instance=0):
+        logger.debug("Initializing %s: (git_model_id: %s, model_filename: %s, instance: %s, "
+                     "configfile: %s, )", self.__class__.__name__, git_model_id, model_filename,
+                     instance, configfile)
 
+        self._instance = instance
         self.config = _get_config(".".join(self.__module__.split(".")[-2:]), configfile=configfile)
         """ dict: Config for this plugin, loaded from ``extract.ini`` configfile """
 
@@ -114,7 +117,7 @@ class Extractor():
         # << SET THE FOLLOWING IN PLUGINS __init__ IF DIFFERENT FROM DEFAULT >> #
         self.name = None
         self.input_size = None
-        self.colorformat = "BGR"
+        self.color_format = "BGR"
         self.vram = None
         self.vram_warnings = None  # Will run at this with warnings
         self.vram_per_batch = None
@@ -138,6 +141,10 @@ class Extractor():
 
         self._threads = []
         """ list: Internal threads for this plugin """
+
+        self._extract_media = dict()
+        """ dict: The :class:`plugins.extract.pipeline.ExtractMedia` objects currently being
+        processed. Stored at input for pairing back up on output of extractor process """
 
         # << THE FOLLOWING PROTECTED ATTRIBUTES ARE SET IN PLUGIN TYPE _base.py >>> #
         self._plugin_type = None
@@ -236,8 +243,8 @@ class Extractor():
         """ **Override method** (at `<plugin_type>` level)
 
         This method should be overridden at the `<plugin_type>` level (IE.
-        :mod:`plugins.extract.detect._base` or :mod:`plugins.extract.align._base`) and should not
-        be overridden within plugins themselves.
+        :mod:`plugins.extract.detect._base`, :mod:`plugins.extract.align._base` or
+        :mod:`plugins.extract.mask._base`) and should not be overridden within plugins themselves.
 
         Handles consistent finalization for all plugins that exist within that plugin type. Its
         input is always the output from :func:`process_output()`
@@ -253,10 +260,11 @@ class Extractor():
         """ **Override method** (at `<plugin_type>` level)
 
         This method should be overridden at the `<plugin_type>` level (IE.
-        :mod:`plugins.extract.detect._base` or :mod:`plugins.extract.align._base`) and should not
-        be overridden within plugins themselves.
+        :mod:`plugins.extract.detect._base`, :mod:`plugins.extract.align._base` or
+        :mod:`plugins.extract.mask._base`) and should not be overridden within plugins themselves.
 
-        Get items from the queue in batches of :attr:`batchsize`
+        Get :class:`~plugins.extract.pipeline.ExtractMedia` items from the queue in batches of
+        :attr:`batchsize`
 
         Parameters
         ----------
@@ -324,7 +332,10 @@ class Extractor():
                      self.__class__.__name__, args, kwargs)
         logger.info("Initializing %s (%s)...", self.name, self._plugin_type.title())
         self.queue_size = 1
-        self._add_queues(kwargs["in_queue"], kwargs["out_queue"], ["predict", "post"])
+        name = self.name.replace(" ", "_").lower()
+        self._add_queues(kwargs["in_queue"],
+                         kwargs["out_queue"],
+                         ["predict_{}".format(name), "post_{}".format(name)])
         self._compile_threads()
         try:
             self.init_model()
@@ -351,24 +362,26 @@ class Extractor():
         self._queues["out"] = out_queue
         for q_name in queues:
             self._queues[q_name] = queue_manager.get_queue(
-                name="{}_{}".format(self._plugin_type, q_name),
+                name="{}{}_{}".format(self._plugin_type, self._instance, q_name),
                 maxsize=self.queue_size)
 
     # <<< THREAD METHODS >>> #
     def _compile_threads(self):
         """ Compile the threads into self._threads list """
         logger.debug("Compiling %s threads", self._plugin_type)
-        self._add_thread("{}_input".format(self._plugin_type),
+        name = self.name.replace(" ", "_").lower()
+        base_name = "{}_{}".format(self._plugin_type, name)
+        self._add_thread("{}_input".format(base_name),
                          self.process_input,
                          self._queues["in"],
-                         self._queues["predict"])
-        self._add_thread("{}_predict".format(self._plugin_type),
+                         self._queues["predict_{}".format(name)])
+        self._add_thread("{}_predict".format(base_name),
                          self._predict,
-                         self._queues["predict"],
-                         self._queues["post"])
-        self._add_thread("{}_output".format(self._plugin_type),
+                         self._queues["predict_{}".format(name)],
+                         self._queues["post_{}".format(name)])
+        self._add_thread("{}_output".format(base_name),
                          self.process_output,
-                         self._queues["post"],
+                         self._queues["post_{}".format(name)],
                          self._queues["out"])
         logger.debug("Compiled %s threads: %s", self._plugin_type, self._threads)
 
@@ -425,40 +438,19 @@ class Extractor():
         out_queue.put("EOF")
 
     # <<< QUEUE METHODS >>> #
-    @staticmethod
-    def _get_item(queue):
+    def _get_item(self, queue):
         """ Yield one item from a queue """
         item = queue.get()
-        if isinstance(item, dict):
-            logger.trace("item: %s, queue: %s",
-                         {k: v.shape if isinstance(v, np.ndarray) else v
-                          for k, v in item.items()},
-                         queue)
+        if isinstance(item, ExtractMedia):
+            logger.trace("filename: '%s', image shape: %s, detected_faces: %s, queue: %s, "
+                         "item: %s",
+                         item.filename, item.image_shape, item.detected_faces, queue, item)
+            self._extract_media[item.filename] = item
         else:
             logger.trace("item: %s, queue: %s", item, queue)
         return item
-
-    # <<< MISC UTILITY METHODS >>> #
-    def _convert_color(self, image):
-        """ Convert the image to the correct color format and strip alpha channel """
-        logger.trace("Converting image to color format: %s", self.colorformat)
-        if self.colorformat == "RGB":
-            cvt_image = image[..., 2::-1].copy()
-        elif self.colorformat == "GRAY":
-            cvt_image = cv2.cvtColor(image.copy(), cv2.COLOR_BGR2GRAY)
-        else:
-            cvt_image = image[..., :3].copy()
-        return cvt_image
 
     @staticmethod
     def _dict_lists_to_list_dicts(dictionary):
         """ Convert a dictionary of lists to a list of dictionaries """
         return [dict(zip(dictionary, val)) for val in zip(*dictionary.values())]
-
-    @staticmethod
-    def _remove_invalid_keys(dictionary, valid_keys):
-        """ Remove items from dict that are no longer required """
-        for key in list(dictionary.keys()):
-            if key not in valid_keys:
-                logger.trace("Removing from output: '%s'", key)
-                del dictionary[key]
