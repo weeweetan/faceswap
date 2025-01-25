@@ -7,4 +7,7 @@ faceswap
    lib/lib
    plugins/plugins
    scripts
-   tools
+   tests/tests
+   tools/tools
+   setup
+   update_deps

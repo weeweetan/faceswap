@@ -6,11 +6,11 @@ import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from lib.gui import (TaskBar, CliOptions, CommandNotebook, ConsoleOut, Session, DisplayNotebook,
+from lib.gui import (TaskBar, CliOptions, CommandNotebook, ConsoleOut, DisplayNotebook,
                      get_images, initialize_images, initialize_config, LastSession,
-                     MainMenuBar, ProcessWrapper, StatusBar)
+                     MainMenuBar, preview_trigger, ProcessWrapper, StatusBar)
 
-logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+logger = logging.getLogger(__name__)
 
 
 class FaceswapGui(tk.Tk):
@@ -23,13 +23,13 @@ class FaceswapGui(tk.Tk):
         self._init_args = dict(debug=debug)
         self._config = self.initialize_globals()
         self.set_fonts()
-        self.set_styles()
         self._config.set_geometry(1200, 640, self._config.user_config_dict["fullscreen"])
 
         self.wrapper = ProcessWrapper()
         self.objects = dict()
 
         get_images().delete_preview()
+        preview_trigger().clear(trigger_type=None)
         self.protocol("WM_DELETE_WINDOW", self.close_app)
         self.build_gui()
         self._last_session = LastSession(self._config)
@@ -39,8 +39,7 @@ class FaceswapGui(tk.Tk):
         """ Initialize config and images global constants """
         cliopts = CliOptions()
         statusbar = StatusBar(self)
-        session = Session()
-        config = initialize_config(self, cliopts, statusbar, session)
+        config = initialize_config(self, cliopts, statusbar)
         initialize_images()
         return config
 
@@ -50,12 +49,6 @@ class FaceswapGui(tk.Tk):
         for font in ("TkDefaultFont", "TkHeadingFont", "TkMenuFont"):
             tk.font.nametofont(font).configure(family=self._config.default_font[0],
                                                size=self._config.default_font[1])
-
-    @staticmethod
-    def set_styles():
-        """ Set global custom styles """
-        gui_style = ttk.Style()
-        gui_style.configure('TLabelframe.Label', foreground="#0046D5", relief=tk.SOLID)
 
     def build_gui(self, rebuild=False):
         """ Build the GUI """
@@ -86,20 +79,14 @@ class FaceswapGui(tk.Tk):
         """ Add the paned window containers that
             hold each main area of the gui """
         logger.debug("Adding containers")
-        maincontainer = tk.PanedWindow(self,
-                                       sashrelief=tk.RIDGE,
-                                       sashwidth=4,
-                                       sashpad=8,
-                                       orient=tk.VERTICAL,
-                                       name="pw_main")
+        maincontainer = ttk.PanedWindow(self,
+                                        orient=tk.VERTICAL,
+                                        name="pw_main")
         maincontainer.pack(fill=tk.BOTH, expand=True)
 
-        topcontainer = tk.PanedWindow(maincontainer,
-                                      sashrelief=tk.RIDGE,
-                                      sashwidth=4,
-                                      sashpad=8,
-                                      orient=tk.HORIZONTAL,
-                                      name="pw_top")
+        topcontainer = ttk.PanedWindow(maincontainer,
+                                       orient=tk.HORIZONTAL,
+                                       name="pw_top")
         maincontainer.add(topcontainer)
 
         bottomcontainer = ttk.Frame(maincontainer, name="frame_bottom")
@@ -130,8 +117,8 @@ class FaceswapGui(tk.Tk):
         logger.debug("Setting Initial Layout: (root_width: %s, root_height: %s, width_ratio: %s, "
                      "height_ratio: %s, width: %s, height: %s", r_width, r_height, w_ratio,
                      h_ratio, width, height)
-        self.objects["container_top"].sash_place(0, width, 1)
-        self.objects["container_main"].sash_place(0, 1, height)
+        self.objects["container_top"].sashpos(0, width)
+        self.objects["container_main"].sashpos(0, height)
         self.update_idletasks()
 
     def rebuild(self):
@@ -146,7 +133,7 @@ class FaceswapGui(tk.Tk):
             self._last_session.from_dict(session_state)
         logger.debug("GUI Redrawn")
 
-    def close_app(self, *args):  # pylint: disable=unused-argument
+    def close_app(self, *args):  # pylint:disable=unused-argument
         """ Close Python. This is here because the graph
             animation function continues to run even when
             tkinter has gone away """
@@ -157,11 +144,12 @@ class FaceswapGui(tk.Tk):
         if not self._config.project.confirm_close():
             return
 
-        if self._config.tk_vars["runningtask"].get():
+        if self._config.tk_vars.running_task.get():
             self.wrapper.task.terminate()
 
         self._last_session.save()
         get_images().delete_preview()
+        preview_trigger().clear(trigger_type=None)
         self.quit()
         logger.debug("Closed GUI")
         sys.exit(0)
@@ -173,19 +161,19 @@ class FaceswapGui(tk.Tk):
         -------
         bool: ``True`` if user confirms close, ``False`` if user cancels close
         """
-        if not self._config.tk_vars["runningtask"].get():
+        if not self._config.tk_vars.running_task.get():
             logger.debug("No tasks currently running")
             return True
 
         confirmtxt = "Processes are still running.\n\nAre you sure you want to exit?"
         if not messagebox.askokcancel("Close", confirmtxt, default="cancel", icon="warning"):
             logger.debug("Close Cancelled")
-            return True
+            return False
         logger.debug("Close confirmed")
-        return False
+        return True
 
 
-class Gui():  # pylint: disable=too-few-public-methods
+class Gui():
     """ The GUI process. """
     def __init__(self, arguments):
         self.root = FaceswapGui(arguments.debug)

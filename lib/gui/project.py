@@ -8,7 +8,7 @@ from tkinter import messagebox
 
 from lib.serializer import get_serializer
 
-logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+logger = logging.getLogger(__name__)
 
 
 class _GuiSession():  # pylint:disable=too-few-public-methods
@@ -90,11 +90,12 @@ class _GuiSession():  # pylint:disable=too-few-public-methods
     def _selected_to_choices(self):
         """ dict: The selected value and valid choices for multi-option, radio or combo options.
         """
-        valid_choices = {cmd: {opt: dict(choices=val["cpanel_option"].choices,
-                                         is_multi=val["cpanel_option"].is_multi_option)
+        valid_choices = {cmd: {opt: {"choices": val.cpanel_option.choices,
+                                     "is_multi": val.cpanel_option.is_multi_option}
                                for opt, val in data.items()
-                               if isinstance(val, dict) and "cpanel_option" in val
-                               and val["cpanel_option"].choices is not None}
+                               if hasattr(val, "cpanel_option")  # Filter out helptext
+                               and val.cpanel_option.choices is not None
+                               }
                          for cmd, data in self._config.cli_opts.opts.items()}
         logger.trace("valid_choices: %s", valid_choices)
         retval = {command: {option: {"value": value,
@@ -144,11 +145,11 @@ class _GuiSession():  # pylint:disable=too-few-public-methods
         bool: `True` if filename has been successfully set otherwise ``False``
         """
         logger.debug("filename: '%s', sess_type: '%s'", filename, sess_type)
-        handler = "config_{}".format(sess_type)
+        handler = f"config_{sess_type}"
 
         if filename is None:
             logger.debug("Popping file handler")
-            cfgfile = self._file_handler("open", handler).retfile
+            cfgfile = self._file_handler("open", handler).return_file
             if not cfgfile:
                 logger.debug("No filename given")
                 return False
@@ -156,7 +157,7 @@ class _GuiSession():  # pylint:disable=too-few-public-methods
             cfgfile.close()
 
         if not os.path.isfile(filename):
-            msg = "File does not exist: '{}'".format(filename)
+            msg = f"File does not exist: '{filename}'"
             logger.error(msg)
             return False
         ext = os.path.splitext(filename)[1]
@@ -209,7 +210,7 @@ class _GuiSession():  # pylint:disable=too-few-public-methods
         opts = self._options.get(command, None)
         retval = {command: opts}
         if not opts:
-            self._config.tk_vars["consoleclear"].set(True)
+            self._config.tk_vars.console_clear.set(True)
             logger.info("No  %s section found in file", command)
             retval = None
         logger.debug(retval)
@@ -249,7 +250,7 @@ class _GuiSession():  # pylint:disable=too-few-public-methods
         """
         for key, tk_var in self._modified_vars.items():
             if (command is None or command == key) and tk_var.get():
-                logger.debug("Reset modified state for: %s", command)
+                logger.debug("Reset modified state for: (command: %s key: %s)", command, key)
                 tk_var.set(False)
 
     # RECENT FILE HANDLING
@@ -380,12 +381,11 @@ class _GuiSession():  # pylint:disable=too-few-public-methods
             True if :attr:`filename` successfully set otherwise ``False``
         """
         logger.debug("Popping save as file handler. session_type: '%s'", session_type)
-        title = "Save {}As...".format("{} ".format(session_type.title())
-                                      if session_type != "all" else "")
+        title = f"Save {f'{session_type.title()} ' if session_type != 'all' else ''}As..."
         cfgfile = self._file_handler("save",
-                                     "config_{}".format(session_type),
+                                     f"config_{session_type}",
                                      title=title,
-                                     initialdir=self._dirname).retfile
+                                     initial_folder=self._dirname).return_file
         if not cfgfile:
             logger.debug("No filename provided. session_type: '%s'", session_type)
             return False
@@ -432,7 +432,7 @@ class Tasks(_GuiSession):
     """
     def __init__(self, config, file_handler):
         super().__init__(config, file_handler)
-        self._tasks = dict()
+        self._tasks = {}
 
     @property
     def _is_project(self):
@@ -539,7 +539,7 @@ class Tasks(_GuiSession):
             logger.debug("Not a .fsw file: '%s'", filename)
             return filename
 
-        new_filename = "{}.fst".format(fname)
+        new_filename = f"{fname}.fst"
         logger.debug("Renaming '%s' to '%s'", filename, new_filename)
         os.rename(filename, new_filename)
         self._del_from_recent(filename, save=True)
@@ -601,9 +601,9 @@ class Tasks(_GuiSession):
             The tab that pertains to the currently active task
 
         """
-        self._tasks[command] = dict(filename=self._filename,
-                                    options=self._options,
-                                    is_project=self._is_project)
+        self._tasks[command] = {"filename": self._filename,
+                                "options": self._options,
+                                "is_project": self._is_project}
 
     def clear_tasks(self):
         """ Clears all of the stored tasks.
@@ -612,7 +612,7 @@ class Tasks(_GuiSession):
         called by :class:`Project` when a project has been loaded which is in fact a task.
         """
         logger.debug("Clearing stored tasks")
-        self._tasks = dict()
+        self._tasks = {}
 
     def add_project_task(self, filename, command, options):
         """ Add an individual task from a loaded :class:`Project` to the internal :attr:`_tasks`
@@ -630,7 +630,7 @@ class Tasks(_GuiSession):
         options: dict
             The options for this task loaded from the project
         """
-        self._tasks[command] = dict(filename=filename, options=options, is_project=True)
+        self._tasks[command] = {"filename": filename, "options": options, "is_project": True}
 
     def _set_active_task(self, command=None):
         """ Set the active :attr:`_filename` and :attr:`_options` to currently selected tab's
@@ -684,7 +684,7 @@ class Project(_GuiSession):
     @property
     def _project_modified(self):
         """bool: ``True`` if the project has been modified otherwise ``False``. """
-        return any([var.get() for var in self._modified_vars.values()])
+        return any(var.get() for var in self._modified_vars.values())
 
     @property
     def _tasks(self):
@@ -727,7 +727,8 @@ class Project(_GuiSession):
             self._modified = self._project_modified
             self._update_root_title()
 
-    def load(self, *args, filename=None):  # pylint:disable=unused-argument
+    def load(self, *args,  # pylint:disable=unused-argument
+             filename=None,  last_session=False):
         """ Load a project from a saved ``.fsw`` project file.
 
         Parameters
@@ -737,8 +738,12 @@ class Project(_GuiSession):
         filename: str, optional
             If a filename is passed in, This will be used, otherwise a file handler will be
             launched to select the relevant file.
+        last_session: bool, optional
+            ``True`` if the project is being loaded from the last opened session ``False`` if the
+            project is being loaded directly from disk. Default: ``False``
         """
-        logger.debug("Loading project config: (filename: '%s')", filename)
+        logger.debug("Loading project config: (filename: '%s', last_session: %s)",
+                     filename, last_session)
         filename_set = self._set_filename(filename, sess_type="project")
 
         if not filename_set:
@@ -757,7 +762,8 @@ class Project(_GuiSession):
             self._handoff_legacy_task()
             return
 
-        self._set_options()
+        if not last_session:
+            self._set_options()  # Options will be set by last session. Don't set now
         self._update_tasks()
         self._add_to_recent()
         self._reset_modified_var()
@@ -851,7 +857,7 @@ class Project(_GuiSession):
         cfgfile = self._file_handler("save",
                                      "config_project",
                                      title="New Project...",
-                                     initialdir=self._basename).retfile
+                                     initial_folder=self._basename).return_file
         if not cfgfile:
             logger.debug("No filename selected")
             return
@@ -994,29 +1000,16 @@ class LastSession(_GuiSession):
         loaded = self._load()
         if not loaded:
             return
-        needs_update = self._set_project()
-        if needs_update:
-            self._set_options()
+        self._set_project()
+        self._set_options()
 
     def _set_project(self):
-        """ Set the :class:`Project` if session is resuming from one.
-
-        Returns
-        -------
-        bool:
-            ``True`` If the GUI still needs to be updated from the last session, ``False`` if
-            the returned GUI state is the last session
-        """
+        """ Set the :class:`Project` if session is resuming from one. """
         if self._options.get("project", None) is None:
             logger.debug("No project stored")
-            retval = True
         else:
             logger.debug("Loading stored project")
-            self._config.project.load(filename=self._options["project"])
-            retval = self._cli_options != self._config.project.cli_options
-
-        logger.debug("Needs update: %s", retval)
-        return retval
+            self._config.project.load(filename=self._options["project"], last_session=True)
 
     def save(self):
         """ Save a snapshot of currently set GUI config options.

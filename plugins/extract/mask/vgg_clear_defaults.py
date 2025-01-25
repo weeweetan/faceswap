@@ -60,6 +60,7 @@ _DEFAULTS = {
         "rounding": 1,
         "min_max": (1, 64),
         "choices": [],
+        "group": "settings",
         "gui_radio": False,
         "fixed": True,
     }

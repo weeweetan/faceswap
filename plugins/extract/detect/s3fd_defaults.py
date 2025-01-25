@@ -44,8 +44,9 @@
 
 
 _HELPTEXT = (
-    "S3FD Detector options.Fast on GPU, slow on CPU. Can detect more faces and fewer false "
-    "positives than other GPU detectors, but is a lot more resource intensive."
+    "S3FD Detector options.\n"
+    "Fast on GPU, slow on CPU. Can detect more faces and fewer false positives than other GPU "
+    "detectors, but is a lot more resource intensive."
     )
 
 
@@ -59,6 +60,7 @@ _DEFAULTS = {
         "rounding": 5,
         "min_max": (25, 100),
         "choices": [],
+        "group": "settings",
         "gui_radio": False,
         "fixed": True,
     },
@@ -73,6 +75,7 @@ _DEFAULTS = {
         "rounding": 1,
         "min_max": (1, 64),
         "choices": [],
+        "group": "settings",
         "gui_radio": False,
         "fixed": True,
     }

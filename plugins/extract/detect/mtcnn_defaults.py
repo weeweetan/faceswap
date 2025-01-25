@@ -53,46 +53,13 @@ _HELPTEXT = (
 _DEFAULTS = {
     "minsize": {
         "default": 20,
-        "info": "The minimum size of a face (in pixels) to be accepted as a positive match.\n"
-                "Lower values use significantly more VRAM and will detect more false "
-                "positives.",
+        "info": "The minimum size of a face (in pixels) to be accepted as a positive match."
+                "\nLower values use significantly more VRAM and will detect more false positives.",
         "datatype": int,
         "rounding": 10,
         "min_max": (20, 1000),
         "choices": [],
-        "gui_radio": False,
-        "fixed": True,
-    },
-    "threshold_1": {
-        "default": 0.6,
-        "info": "First stage threshold for face detection. This stage obtains face "
-                "candidates.",
-        "datatype": float,
-        "rounding": 2,
-        "min_max": (0.1, 0.9),
-        "choices": [],
-        "gui_radio": False,
-        "fixed": True,
-    },
-    "threshold_2": {
-        "default": 0.7,
-        "info": "Second stage threshold for face detection. This stage refines face "
-                "candidates.",
-        "datatype": float,
-        "rounding": 2,
-        "min_max": (0.1, 0.9),
-        "choices": [],
-        "gui_radio": False,
-        "fixed": True,
-    },
-    "threshold_3": {
-        "default": 0.7,
-        "info": "Third stage threshold for face detection. This stage further refines face "
-                "candidates.",
-        "datatype": float,
-        "rounding": 2,
-        "min_max": (0.1, 0.9),
-        "choices": [],
+        "group": "settings",
         "gui_radio": False,
         "fixed": True,
     },
@@ -103,6 +70,7 @@ _DEFAULTS = {
         "rounding": 3,
         "min_max": (0.1, 0.9),
         "choices": [],
+        "group": "settings",
         "gui_radio": False,
         "fixed": True,
     },
@@ -116,7 +84,50 @@ _DEFAULTS = {
         "rounding": 1,
         "min_max": (1, 64),
         "choices": [],
+        "group": "settings",
         "gui_radio": False,
         "fixed": True,
-    }
+    },
+    "cpu": {
+        "default": True,
+        "info": "MTCNN detector still runs fairly quickly on CPU on some setups. "
+                "Enable CPU mode here to use the CPU for this detector to save some VRAM at a "
+                "speed cost.",
+        "datatype": bool,
+        "group": "settings"
+    },
+    "threshold_1": {
+        "default": 0.6,
+        "info": "First stage threshold for face detection. This stage obtains face candidates.",
+        "datatype": float,
+        "rounding": 2,
+        "min_max": (0.1, 0.9),
+        "choices": [],
+        "group": "threshold",
+        "gui_radio": False,
+        "fixed": True,
+    },
+    "threshold_2": {
+        "default": 0.7,
+        "info": "Second stage threshold for face detection. This stage refines face candidates.",
+        "datatype": float,
+        "rounding": 2,
+        "min_max": (0.1, 0.9),
+        "choices": [],
+        "group": "threshold",
+        "gui_radio": False,
+        "fixed": True,
+    },
+    "threshold_3": {
+        "default": 0.7,
+        "info": "Third stage threshold for face detection. This stage further refines face "
+                "candidates.",
+        "datatype": float,
+        "rounding": 2,
+        "min_max": (0.1, 0.9),
+        "choices": [],
+        "group": "threshold",
+        "gui_radio": False,
+        "fixed": True,
+    },
 }

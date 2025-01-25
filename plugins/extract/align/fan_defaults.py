@@ -44,7 +44,8 @@
 
 
 _HELPTEXT = (
-    "FAN Aligner options.Fast on GPU, slow on CPU. Best aligner."
+    "FAN Aligner options.\n"
+    "Fast on GPU, slow on CPU. Best aligner."
     )
 
 
@@ -60,6 +61,7 @@ _DEFAULTS = {
         "rounding": 1,
         "min_max": (1, 64),
         "choices": [],
+        "group": "settings",
         "gui_radio": False,
         "fixed": True,
     }
